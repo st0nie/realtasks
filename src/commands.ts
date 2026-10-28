@@ -4,7 +4,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getKeybindings, type KeyId } from "@earendil-works/pi-tui";
 import type { Runtime } from "./runtime.ts";
 import type { Task } from "./task.ts";
-import { decodeEscapes } from "./text.ts";
+import { readTail } from "./output.ts";
+import { cleanOutput, decodeEscapes, lastLines } from "./text.ts";
 import { TasksOverlay, type ManagerAction } from "./ui.ts";
 
 /** User-started task (/bg <cmd>, restart): silent, never wakes the agent. */
@@ -81,26 +82,42 @@ export function registerCommands(pi: ExtensionAPI, rt: Runtime): void {
 		},
 	});
 
+	const USAGE = "Usage: /tasks · /tasks stop <id|all> · /tasks clear [all] · /tasks log <id>";
+	const SUBS = ["stop", "clear", "log"];
 	pi.registerCommand("tasks", {
-		description: "Open the task manager, or `/tasks stop <id|all>`",
+		description: "Open the task manager, or /tasks stop <id|all> · clear [all] · log <id>",
 		getArgumentCompletions: (prefix) => {
 			const parts = prefix.split(/\s+/);
-			if (parts.length <= 1) return [{ value: "stop ", label: "stop" }].filter((i) => i.value.startsWith(prefix));
-			if (parts[0] !== "stop") return null;
-			const ids = ["all", ...rt.manager.list().filter((t) => t.running).map((t) => t.rec.id)];
-			return ids.filter((id) => id.startsWith(parts[1] ?? "")).map((id) => ({ value: `stop ${id}`, label: id }));
+			if (parts.length <= 1) {
+				return SUBS.filter((s) => s.startsWith(prefix)).map((s) => ({ value: `${s} `, label: s }));
+			}
+			const [sub, arg = ""] = parts;
+			let options: string[];
+			if (sub === "stop") options = ["all", ...rt.manager.list().filter((t) => t.running).map((t) => t.rec.id)];
+			else if (sub === "clear") options = ["all"];
+			else if (sub === "log") options = rt.manager.list().map((t) => t.rec.id);
+			else return null;
+			return options.filter((o) => o.startsWith(arg)).map((o) => ({ value: `${sub} ${o}`, label: o }));
 		},
 		handler: async (args, ctx) => {
-			const [sub, id] = args.trim().split(/\s+/);
+			const [sub, arg] = args.trim().split(/\s+/);
 			if (!sub) return openManager(rt, ctx);
-			if (sub !== "stop" || !id) {
-				ctx.ui.notify("Usage: /tasks  or  /tasks stop <id|all>", "warning");
-				return;
-			}
 			try {
-				const targets = id === "all" ? rt.manager.list().filter((t) => t.running) : [rt.manager.resolve(id)];
-				for (const t of targets) t.stop();
-				ctx.ui.notify(targets.length ? `Stopping ${targets.map((t) => t.rec.id).join(", ")}` : "No running tasks.", "info");
+				if (sub === "stop" && arg) {
+					const targets = arg === "all" ? rt.manager.list().filter((t) => t.running) : [rt.manager.resolve(arg)];
+					for (const t of targets) t.stop();
+					ctx.ui.notify(targets.length ? `Stopping ${targets.map((t) => t.rec.id).join(", ")}` : "No running tasks.", "info");
+				} else if (sub === "clear" && (arg === undefined || arg === "all")) {
+					const { cleared, keptUnread } = rt.manager.clearFinished(arg === "all");
+					const kept = keptUnread ? ` Kept ${keptUnread} the agent has not read yet; use /tasks clear all to drop them too.` : "";
+					ctx.ui.notify(`Cleared ${cleared} finished task${cleared === 1 ? "" : "s"}.${kept}`, "info");
+				} else if (sub === "log" && arg) {
+					const t = rt.manager.resolve(arg);
+					const tail = lastLines(cleanOutput(readTail(t.rec.logPath, 64 * 1024)), 20).trimEnd();
+					ctx.ui.notify(`${t.rec.id} ${t.rec.status} · ${t.rec.logPath}\n${tail || "(no output)"}`, "info");
+				} else {
+					ctx.ui.notify(USAGE, "warning");
+				}
 			} catch (e) {
 				ctx.ui.notify((e as Error).message, "error");
 			}

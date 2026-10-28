@@ -11,17 +11,24 @@ import type { NotificationDetails } from "./notify.ts";
 
 export const DOCK_WIDGET = "realtasks-dock";
 export const STATUS_KEY = "realtasks";
-const DOCK_MAX_PILLS = 3;
 
-function icon(t: Task): string {
-	if (t.rec.kind === "monitor") return "◉";
-	return t.rec.tty ? "⌨" : "⚙";
+/** Claude Code-style star twinkle, played forward then back (not Pi's braille spinner). */
+const STAR = ["·", "✢", "✳", "✶", "✻", "✽"];
+export const SPINNER = [...STAR, ...STAR.slice(1, -1).reverse()];
+export const FRAME_MS = 120;
+export const LINGER_MS = 10_000;
+const DOCK_MAX_ROWS = 5;
+
+export function spinnerFrame(now = Date.now()): string {
+	return SPINNER[Math.floor(now / FRAME_MS) % SPINNER.length];
 }
 
-function statusIcon(t: Task, th: Theme): string {
+/** Status glyph; running tasks animate (spinner for shells, pulse for monitors). */
+function statusIcon(t: Task, th: Theme, now = Date.now()): string {
 	switch (t.rec.status) {
 		case "running":
-			return th.fg("accent", "●");
+			if (t.rec.kind === "monitor") return th.fg("accent", Math.floor(now / 600) % 2 ? "◎" : "◉");
+			return th.fg("accent", spinnerFrame(now));
 		case "completed":
 			return th.fg("success", "✓");
 		case "stopped":
@@ -33,24 +40,51 @@ function statusIcon(t: Task, th: Theme): string {
 	}
 }
 
-/** Dock lines: one pill per running task, collapsed past three. */
-export function dockLines(tasks: Task[], th: Theme, width: number, now = Date.now()): string[] {
-	const running = tasks.filter((t) => t.running && !t.rec.foreground);
-	if (running.length === 0) return [];
-	if (running.length > DOCK_MAX_PILLS) {
-		const kinds = running.map((t) => icon(t)).join("");
-		return [truncateToWidth(th.fg("dim", `${kinds} ${running.length} running · /tasks to manage`), width)];
-	}
-	return running.map((t) => {
-		const last = lastNonEmptyLine(cleanOutput(t.ring.recent().slice(-2048)));
-		const head = `${icon(t)} ${th.fg("accent", t.rec.id)} ${t.rec.label} ${th.fg("dim", formatDuration(now - t.rec.startedAt))}`;
-		const tail = last ? th.fg("dim", ` │ ${last}`) : "";
-		return truncateToWidth(head + tail, width);
-	});
+/** Rows the dock shows: running tasks, plus tasks that ended within LINGER_MS. */
+export function dockTasks(tasks: Task[], now = Date.now()): Task[] {
+	return tasks.filter((t) => !t.rec.foreground && (t.running || (t.rec.endedAt ?? 0) > now - LINGER_MS));
 }
 
-/** `✓2 ✗1` counts for terminal tasks the agent has not read yet. */
-export function statusCounts(tasks: Task[], th: Theme): string | undefined {
+function taskRow(t: Task, th: Theme, now: number): string {
+	const r = t.rec;
+	const parts = [statusIcon(t, th, now), th.fg("dim", r.id), th.fg(t.running ? "text" : "muted", r.label)];
+	if (t.running) {
+		parts.push(th.fg("dim", `· ${formatDuration(now - r.startedAt)}`));
+		const last = lastNonEmptyLine(cleanOutput(t.ring.recent().slice(-2048)));
+		let row = parts.join(" ");
+		if (last) row += th.fg("dim", ` │ ${last}`);
+		return row;
+	}
+	const code = r.exitCode !== undefined ? `exit ${r.exitCode}` : r.signal ? r.signal : r.status;
+	parts.push(th.fg("dim", `· ${code} · ${formatDuration((r.endedAt ?? now) - r.startedAt)}`));
+	return parts.join(" ");
+}
+
+/** Dock lines: tree in the rpiv-todo / Claude Code background-tasks style. */
+export function dockLines(tasks: Task[], th: Theme, width: number, now = Date.now()): string[] {
+	const shown = dockTasks(tasks, now);
+	if (shown.length === 0) return [];
+	const running = shown.filter((t) => t.running).length;
+	const done = shown.length - running;
+	const fit = (s: string) => truncateToWidth(s, width, "…");
+	const color = running ? "accent" : "dim";
+	const counts = [running ? `${running} running` : "", done ? `${done} done` : ""].filter(Boolean).join(" · ");
+	const lines = [fit(`${th.fg(color, running ? "●" : "○")} ${th.fg(color, `Tasks (${counts})`)}`)];
+	// Running first, then most recently finished.
+	const ordered = [...shown.filter((t) => t.running), ...shown.filter((t) => !t.running).reverse()];
+	const visible = ordered.slice(0, DOCK_MAX_ROWS);
+	const hidden = ordered.length - visible.length;
+	visible.forEach((t, i) => {
+		const last = i === visible.length - 1 && hidden === 0;
+		lines.push(fit(`${th.fg("dim", last ? "└─" : "├─")} ${taskRow(t, th, now)}`));
+	});
+	if (hidden > 0) lines.push(fit(`${th.fg("dim", "└─")} ${th.fg("dim", `+${hidden} more · /tasks`)}`));
+	lines.push("");
+	return lines;
+}
+
+/** `⠹2 ✓2 ✗1`: spinner + running count, then unread finished counts. */
+export function statusCounts(tasks: Task[], th: Theme, now = Date.now()): string | undefined {
 	let ok = 0;
 	let bad = 0;
 	let running = 0;
@@ -63,7 +97,7 @@ export function statusCounts(tasks: Task[], th: Theme): string | undefined {
 		}
 	}
 	const parts: string[] = [];
-	if (running) parts.push(th.fg("accent", `⚙${running}`));
+	if (running) parts.push(th.fg("accent", `${spinnerFrame(now)}${running}`));
 	if (ok) parts.push(th.fg("success", `✓${ok}`));
 	if (bad) parts.push(th.fg("error", `✗${bad}`));
 	return parts.length ? parts.join(" ") : undefined;
@@ -81,7 +115,7 @@ class DockComponent implements Component {
 		this.tui = tui;
 		this.th = th;
 		this.off = rt.onChange(() => this.tui.requestRender());
-		this.ticker = setInterval(() => this.tui.requestRender(), 1000);
+		this.ticker = setInterval(() => this.tui.requestRender(), FRAME_MS);
 		this.ticker.unref();
 	}
 	render(width: number): string[] {
@@ -98,22 +132,43 @@ class DockComponent implements Component {
 export function installDock(rt: Runtime, ctx: ExtensionContext): () => void {
 	if (ctx.mode !== "tui") return () => {};
 	let shown = false;
+	let statusTimer: ReturnType<typeof setInterval> | undefined;
+	let lingerTimer: ReturnType<typeof setTimeout> | undefined;
+	const setStatus = () => ctx.ui.setStatus(STATUS_KEY, statusCounts(rt.manager.list(), ctx.ui.theme));
 	const sync = () => {
 		const tasks = rt.manager.list();
-		const anyRunning = tasks.some((t) => t.running);
-		if (anyRunning && !shown) {
+		const visible = dockTasks(tasks).length > 0;
+		if (visible && !shown) {
 			ctx.ui.setWidget(DOCK_WIDGET, (tui, th) => new DockComponent(rt, tui, th));
 			shown = true;
-		} else if (!anyRunning && shown) {
+		} else if (!visible && shown) {
 			ctx.ui.setWidget(DOCK_WIDGET, undefined);
 			shown = false;
 		}
-		ctx.ui.setStatus(STATUS_KEY, statusCounts(tasks, ctx.ui.theme));
+		// Animate the status spinner only while something runs.
+		const anyRunning = tasks.some((t) => t.running && !t.rec.foreground);
+		if (anyRunning && !statusTimer) {
+			statusTimer = setInterval(setStatus, FRAME_MS);
+			statusTimer.unref();
+		} else if (!anyRunning && statusTimer) {
+			clearInterval(statusTimer);
+			statusTimer = undefined;
+		}
+		// Re-check once the newest lingering row expires so the dock hides.
+		if (lingerTimer) clearTimeout(lingerTimer);
+		lingerTimer = undefined;
+		if (visible && !anyRunning) {
+			lingerTimer = setTimeout(sync, LINGER_MS + 50);
+			lingerTimer.unref();
+		}
+		setStatus();
 	};
 	const off = rt.onChange(sync);
 	sync();
 	return () => {
 		off();
+		if (statusTimer) clearInterval(statusTimer);
+		if (lingerTimer) clearTimeout(lingerTimer);
 		try {
 			ctx.ui.setWidget(DOCK_WIDGET, undefined);
 			ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -205,8 +260,8 @@ export class TasksOverlay implements Component {
 				},
 			);
 		} else if (data === "x") {
-			const n = this.rt.manager.clearFinished();
-			this.flash = `Cleared ${n} finished`;
+			const { cleared, keptUnread } = this.rt.manager.clearFinished();
+			this.flash = `Cleared ${cleared} finished${keptUnread ? ` · kept ${keptUnread} unread (/tasks clear all)` : ""}`;
 		}
 		this.tui.requestRender();
 	}

@@ -45,11 +45,20 @@ Output goes to `~/.pi/agent/tasks/<session>/<id>.log`. Logs rotate at 50 MB and 
 
 ## TUI
 
-- The dock above the editor shows each running task with its latest output line. The status line shows counts of unread finished tasks.
+- The dock above the editor draws running and just-finished tasks as a tree, with an animated star spinner for running ones:
+
+  ```
+  ● Tasks (2 running · 1 done)
+  ├─ ✳ bxomyvwe npm test · 42s │ test 31 ok
+  ├─ ◉ mshcwo0p app errors · 12s │ ERROR boom 3
+  └─ ✓ b2ywygi6 build · exit 0 · 8s
+  ```
+
+  Finished rows stay for 10 s. The status line shows the running count and unread finished counts (`✳2 ✓1 ✗1`).
 - `ctrl+shift+b` or `/bg` sends running foreground commands to the background. Typing a message while one runs does the same.
 - `shift+down` or `/tasks` opens the manager. Its keys are `k` stop, `i` input, `r` restart, `c` copy log path, `x` clear finished, and `enter` follow.
 - `/bg <cmd>` starts a task yourself. Its completion never wakes the agent.
-- `/tasks stop <id|all>` stops tasks.
+- `/tasks stop <id|all>` stops tasks. `/tasks clear` removes finished tasks the agent has already seen; `/tasks clear all` removes every finished task. `/tasks log <id>` shows a task's log path and last 20 lines.
 
 Shortcuts never take a key Pi already binds (`ctrl+b`, for example, is cursor-left). A conflicting setting is skipped with a warning.
 

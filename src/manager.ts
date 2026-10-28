@@ -301,16 +301,28 @@ export class TaskManager {
 		return [...this.tasks.values()].filter((t) => t.rec.foreground && t.running);
 	}
 
-	clearFinished(): number {
-		let n = 0;
+	/**
+	 * Drop finished tasks from the registry (logs stay on disk). Unread ones
+	 * are kept unless `includeUnread`, which also latches them so no
+	 * notification follows.
+	 */
+	clearFinished(includeUnread = false): { cleared: number; keptUnread: number } {
+		let cleared = 0;
+		let keptUnread = 0;
 		for (const [id, t] of this.tasks) {
-			if (!t.running && !t.rec.foreground) {
-				this.tasks.delete(id);
-				n++;
+			if (t.running || t.rec.foreground) continue;
+			// The agent is never told about /bg or silent tasks, so they are never "pending".
+			const pending = !t.rec.notified && !t.rec.userStarted && t.rec.notify !== "silent";
+			if (pending && !includeUnread) {
+				keptUnread++;
+				continue;
 			}
+			if (!t.rec.notified) this.markNotified(id);
+			this.tasks.delete(id);
+			cleared++;
 		}
 		this.events.changed();
-		return n;
+		return { cleared, keptUnread };
 	}
 
 	markNotified(id: string): void {

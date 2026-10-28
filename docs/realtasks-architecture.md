@@ -245,7 +245,16 @@ Step 2 needs a spike to confirm the assistant message is on the branch before to
 The user sees what is running at a glance and can take over any task without asking the agent.
 
 - **Foreground `bash` rendering**: live tail via `onUpdate` (last 8 lines), elapsed time, and a dim hint after 2 s: `ctrl+shift+b to background`. Shows `requested → executed` when the rtk hook rewrote the command.
-- **Dock** (`ctx.ui.setWidget`, above the editor): one pill per running task with kind icon, label, elapsed time and the latest output line; collapses to `3 running` when more than 3. Hidden when empty. Status line carries `✓2 ✗1` counts for unread terminal tasks.
+- **Dock** (`ctx.ui.setWidget`, above the editor), drawn as a tree in the style of rpiv-todo and Claude Code's background tasks:
+
+  ```
+  ● Tasks (2 running · 1 done)
+  ├─ ✳ bxomyvwe npm test · 42s │ test 31 ok
+  ├─ ◉ mshcwo0p app errors · 12s │ ERROR boom 3
+  └─ ✓ b2ywygi6 build · exit 0 · 8s
+  ```
+
+  The heading is `●` in the accent color while anything runs, `○` dim otherwise. Each row has a status glyph, the id (dim), the label, the elapsed or total time, and for running tasks the latest output line after a dim `│`. Running shell and PTY tasks show an animated star spinner in the style of Claude Code (`·✢✳✶✻✽` played forward then back, one frame per 120 ms). It is deliberately not Pi's braille spinner, so task activity looks different from Pi's own "Working" indicator. Running monitors pulse between `◉` and `◎`. Finished tasks stay for 10 s after they end with `✓` (completed), `✗` (failed, timed out), `■` (stopped) or `?` (lost), then drop out. At most 5 task rows; the rest collapse into `└─ +N more · /tasks`. The last row uses `└─`, and one blank line follows the panel so it does not touch the editor. The dock is hidden when nothing is running or lingering, and the animation timer runs only while the dock is shown. The status line carries the spinner frame and the running count (`✳2`) plus `✓2 ✗1` counts for unread finished tasks.
 - **`/tasks` manager** (`ctx.ui.custom` overlay): list on the left, live log on the right. Keys: `↑↓` select, `enter` toggle follow, `pgup`/`pgdn` scroll, `k` stop, `i` send input (prompts for text, C escapes decoded), `r` restart with the same command, `c` copy log path, `x` clear finished, `esc` close. Restart stops the task if it is running, then starts a new user task (as `/bg <cmd>`) with the same executed command, cwd, `tty` and `stdin`; the new task gets a new id. Opening the manager marks finished tasks as seen by the user (clears the `✓`/`✗` status counts) without touching the agent's `notified` latch.
 - **Cooperative steering**: typing a message while a foreground `bash` runs promotes it to a task, aborts the turn and delivers the message as a fresh user turn (patty's behavior, Claude Code parity). Opt-out via `steerPromotes: false`.
 
@@ -257,6 +266,8 @@ The user sees what is running at a glance and can take over any task without ask
 | `/bg <cmd>` | User starts a task directly; output goes to the log, not the model context. Its completion is a UI toast only (`silent`), so it never wakes the agent |
 | `/tasks` | Open the manager |
 | `/tasks stop <id or all>` | Stop from the command line |
+| `/tasks clear [all]` | Remove finished tasks from the list, the dock and the status counts. Their logs stay on disk until the retention sweep. A finished task whose outcome the agent has not read yet is kept unless `all` is given (tasks the agent is never told about, `/bg <cmd>` tasks and `notify: "silent"` tasks, do not count as unread and are always cleared); `all` also marks those as read, so no notification for them is sent later. Running tasks are never touched (stop them first). Reports how many were cleared and how many unread ones were kept |
+| `/tasks log <id>` | Print the task's log path and its last 20 lines as a UI notice (no model context) |
 
 **No conflicts with Pi's keybindings.** realtasks never takes a key Pi binds by default (for example `ctrl+b` is cursor-left, `ctrl+shift+up`/`down` jump between prompts) or one the user bound in `keybindings.json`. The defaults `ctrl+shift+b` and `shift+down` are unbound in Pi. At load, each configured shortcut is checked against Pi's resolved keybindings (`getKeybindings().getResolvedBindings()`, which merges defaults and user bindings); a clashing shortcut is not registered and a warning names the Pi action it would shadow and the `shortcuts.*` key in `realtasks/config.json` to change. `/bg` and `/tasks` always remain available. Every shortcut is remappable in that config, and `off` disables it.
 
