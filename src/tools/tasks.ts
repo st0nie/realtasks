@@ -2,10 +2,12 @@
 
 import { Type } from "typebox";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { fileSize, formatForModel, readRange } from "../output.ts";
 import type { Runtime } from "../runtime.ts";
 import type { Task } from "../task.ts";
-import { cleanOutput, decodeEscapes, encodeKeys, formatDuration, lastLines } from "../text.ts";
+import { cleanOutput, decodeEscapes, encodeKeys, formatDuration, lastLines, lastNonEmptyLine } from "../text.ts";
+import { callLine, humanMs, inputPreview, taskName, waitLine, type WaitDetails } from "./render.ts";
 
 const MAX_WAIT_MS = 600_000;
 
@@ -34,15 +36,37 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
-/** Wait for exit, a grep match in new output, or the deadline. */
-async function waitFor(t: Task, ms: number, re: RegExp | undefined, from: number, signal?: AbortSignal): Promise<void> {
-	const deadline = Date.now() + Math.min(MAX_WAIT_MS, Math.max(0, ms));
-	while (t.running && Date.now() < deadline && !signal?.aborted) {
+/**
+ * Wait for exit, a grep match in new output, or the deadline. Calls `tick`
+ * about once a second (and on new output) so the UI can show progress.
+ */
+async function waitFor(
+	t: Task,
+	ms: number,
+	re: RegExp | undefined,
+	from: number,
+	signal: AbortSignal | undefined,
+	tick: (waitedMs: number) => void,
+): Promise<WaitDetails["reason"]> {
+	const started = Date.now();
+	const deadline = started + Math.min(MAX_WAIT_MS, Math.max(0, ms));
+	let reason: WaitDetails["reason"] = "cap";
+	while (t.running && Date.now() < deadline) {
+		if (signal?.aborted) {
+			reason = "abort";
+			break;
+		}
 		t.poll();
-		if (re && re.test(cleanOutput(readRange(t.rec.logPath, from)))) return;
+		if (re && re.test(cleanOutput(readRange(t.rec.logPath, from)))) {
+			reason = "grep";
+			break;
+		}
+		tick(Date.now() - started);
 		await Promise.race([t.waitOutput(), sleep(Math.min(1000, deadline - Date.now()), signal)]);
 	}
+	if (!t.running && reason === "cap") reason = "exit";
 	t.poll();
+	return reason;
 }
 
 export function registerTaskTools(rt: Runtime): void {
@@ -66,13 +90,37 @@ export function registerTaskTools(rt: Runtime): void {
 			grep: Type.Optional(Type.String({ description: "Regex; only matching lines are returned" })),
 			tail_lines: Type.Optional(Type.Number({ description: "Max lines returned (default 200)" })),
 		}),
-		async execute(_id, p, signal, _u, ctx) {
+		renderCall(args, th) {
+			const cap = typeof args.wait_ms === "number" && args.wait_ms > 0 ? `wait up to ${humanMs(Math.min(MAX_WAIT_MS, args.wait_ms))}` : undefined;
+			const grep = typeof args.grep === "string" ? `grep /${args.grep}/` : undefined;
+			return callLine(th, "task_output", taskName(rt, args.id), [cap, grep].filter(Boolean).join(" · ") || undefined);
+		},
+		renderResult(result, opts, th) {
+			const d = result.details as WaitDetails | undefined;
+			if (d?.phase === "waiting" || (d?.phase === "done" && !opts.expanded)) return new Text(waitLine(d, th), 0, 0);
+			const body = result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+			return new Text(th.fg("toolOutput", opts.expanded ? body : lastLines(body, 6)), 0, 0);
+		},
+		async execute(_id, p, signal, onUpdate, ctx) {
 			rt.ctx = ctx;
 			const t = m.resolve(p.id);
 			const re = p.grep ? new RegExp(p.grep) : undefined;
 			const start = p.from === "start" ? 0 : typeof p.from === "number" ? Math.max(0, p.from) : t.agentCursor;
-			if (p.wait_ms && p.wait_ms > 0) await waitFor(t, p.wait_ms, re, start, signal);
-			else t.poll();
+			const capMs = Math.min(MAX_WAIT_MS, Math.max(0, p.wait_ms ?? 0));
+			const waitStart = Date.now();
+			const base = { label: t.rec.label, id: t.rec.id, capMs };
+			let reason: WaitDetails["reason"] = "none";
+			if (capMs > 0 && t.running) {
+				reason = await waitFor(t, capMs, re, start, signal, (waitedMs) =>
+					onUpdate?.({
+						content: [{ type: "text", text: "" }],
+						details: { ...base, phase: "waiting", waitedMs, last: lastNonEmptyLine(cleanOutput(t.ring.recent().slice(-2048))) },
+					}),
+				);
+			} else {
+				t.poll();
+				if (!t.running) reason = "exit";
+			}
 			const end = fileSize(t.rec.logPath);
 			const raw = readRange(t.rec.logPath, Math.min(start, end), end);
 			t.agentCursor = end;
@@ -99,7 +147,15 @@ export function registerTaskTools(rt: Runtime): void {
 			];
 			return {
 				content: [{ type: "text", text: out.join("\n") }],
-				details: { id: r.id, status: r.status, exitCode: r.exitCode, cursor: end },
+				details: {
+					...base,
+					phase: "done",
+					waitedMs: Date.now() - waitStart,
+					reason,
+					status: r.status,
+					exitCode: r.exitCode,
+					cursor: end,
+				},
 			};
 		},
 	});
@@ -118,6 +174,9 @@ export function registerTaskTools(rt: Runtime): void {
 			eof: Type.Optional(Type.Boolean({ description: "Close stdin (pipe) or send Ctrl-D (PTY) after writing" })),
 			wait_ms: Type.Optional(Type.Number({ description: "How long to collect output after writing (default 750)" })),
 		}),
+		renderCall(args, th) {
+			return callLine(th, "task_input", taskName(rt, args.id), inputPreview(args.text, args.keys, args.eof) || undefined);
+		},
 		async execute(_id, p, signal, _u, ctx) {
 			rt.ctx = ctx;
 			const t = m.resolve(p.id);
@@ -154,6 +213,10 @@ export function registerTaskTools(rt: Runtime): void {
 			signal: Type.Optional(Type.String({ description: "Signal name (default SIGTERM)" })),
 			grace_ms: Type.Optional(Type.Number({ description: "Wait before SIGKILL (default 3000)" })),
 		}),
+		renderCall(args, th) {
+			const sig = typeof args.signal === "string" && args.signal.toUpperCase() !== "SIGTERM" ? args.signal.toUpperCase() : undefined;
+			return callLine(th, "task_stop", taskName(rt, args.id), sig);
+		},
 		async execute(_id, p, _s, _u, ctx) {
 			rt.ctx = ctx;
 			const targets = p.id === "all" ? m.list().filter((t) => t.running) : [m.resolve(p.id)];

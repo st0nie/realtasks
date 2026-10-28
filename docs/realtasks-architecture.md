@@ -245,6 +245,7 @@ Step 2 needs a spike to confirm the assistant message is on the branch before to
 The user sees what is running at a glance and can take over any task without asking the agent.
 
 - **Foreground `bash` rendering**: live tail via `onUpdate` (last 8 lines), elapsed time, and a dim hint after 2 s: `ctrl+shift+b to background`. Shows `requested → executed` when the rtk hook rewrote the command.
+- **Task tool rendering** (`renderCall`/`renderResult` on `task_output`, `task_input`, `task_stop`, `monitor`): calls name the task by label, never by bare id, and show durations in human units, never raw milliseconds. Examples: `task_output npm test (b7f3k9a2) · wait up to 10m`, `task_input python REPL (bdw9czz1) · "print(2+2)⏎"`, `task_stop dev server (bgkrw0t2)`, `task_stop all running tasks`. An unknown id falls back to the id alone. While `task_output` waits, its row shows a live line updated every second, `✳ waiting for npm test · 1m12s of 10m │ test 31 ok`, with the spinner, the elapsed wait, the cap, and the task's latest output line (sent through `onUpdate`, so it is visible but costs no model tokens). When it returns, the row shows why: `✓ npm test completed exit 0 · waited 1m14s`, `grep matched · waited 3s`, or `still running · waited 10m (cap)`. The model-facing parameter stays `wait_ms` for API stability; only the display changes.
 - **Dock** (`ctx.ui.setWidget`, above the editor), drawn as a tree in the style of rpiv-todo and Claude Code's background tasks:
 
   ```

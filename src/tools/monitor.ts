@@ -4,7 +4,8 @@ import { Type } from "typebox";
 import type { Runtime } from "../runtime.ts";
 import type { Task } from "../task.ts";
 import { eventBlock, signalBlock } from "../notify.ts";
-import { stripAnsi } from "../text.ts";
+import { oneLine, stripAnsi } from "../text.ts";
+import { callLine, humanMs } from "./render.ts";
 
 export const BATCH_MS = 2000;
 const MAX_LINE = 500;
@@ -132,6 +133,13 @@ export function registerMonitor(rt: Runtime, hub: MonitorHub): void {
 				}),
 			),
 		}),
+		renderCall(args, th) {
+			const what = typeof args.file === "string" ? `file ${args.file}` : typeof args.command === "string" ? `$ ${oneLine(args.command, 60)}` : "";
+			const extra = [what, typeof args.filter === "string" ? `/${args.filter}/` : "", args.persistent ? "session" : typeof args.timeout_ms === "number" ? `for ${humanMs(args.timeout_ms)}` : ""]
+				.filter(Boolean)
+				.join(" · ");
+			return callLine(th, "monitor", typeof args.description === "string" ? args.description : "…", extra || undefined);
+		},
 		async execute(toolCallId, p, _s, _u, ctx) {
 			rt.ctx = ctx;
 			const hasCommand = Boolean(p.command);
