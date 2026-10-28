@@ -1,0 +1,30 @@
+{
+  "name": "realtasks",
+  "version": "0.1.0",
+  "description": "Background tasks for pi: yield-window bash, exactly-once task notifications, stdin/PTY driving, readiness, re-adoption, monitors, rtk-compatible.",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension", "background-tasks"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/st0nie/realtasks.git" },
+  "files": ["index.ts", "src/", "docs/", "README.md", "LICENSE"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "bun test",
+    "check": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
+    "typebox": "^1.4.3"
+  },
+  "optionalDependencies": {
+    "@lydell/node-pty": "1.2.0-beta.18"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}
