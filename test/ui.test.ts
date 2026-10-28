@@ -45,8 +45,10 @@ function task(id: string, over: Partial<TaskRecord> = {}, out = ""): Task {
 
 describe("spinner", () => {
 	test("uses star frames, never Pi's braille spinner", () => {
-		expect(SPINNER).toEqual(["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]);
+		expect(SPINNER).toEqual(["·", "✢", "✱", "✶", "✻", "✽", "✻", "✶", "✱", "✢"]);
 		expect(SPINNER.join("")).not.toMatch(/[\u2800-\u28ff]/);
+		// No emoji characters: terminals may draw them double-width in color (\u2733 on Windows Terminal).
+		expect(SPINNER.join("")).not.toMatch(/\p{Emoji}/u);
 	});
 	test("advances one frame per FRAME_MS and loops", () => {
 		expect(spinnerFrame(0)).toBe("·");
@@ -94,7 +96,7 @@ describe("dock", () => {
 			th,
 			FRAME_MS * 2,
 		);
-		expect(s).toBe("✳1 ✓1 ✗1");
+		expect(s).toBe("✱1 ✓1 ✗1");
 	});
 });
 
