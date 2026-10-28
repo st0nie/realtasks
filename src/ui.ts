@@ -87,7 +87,7 @@ export function dockLines(tasks: Task[], th: Theme, width: number, now = Date.no
 	return lines;
 }
 
-/** `⠹2 ✓2 ✗1`: spinner + running count, then unread finished counts. */
+/** `✱ 2 ✓ 2 ✗ 1`: spinner + running count, then unread finished counts. */
 export function statusCounts(tasks: Task[], th: Theme, now = Date.now()): string | undefined {
 	let ok = 0;
 	let bad = 0;
@@ -101,9 +101,9 @@ export function statusCounts(tasks: Task[], th: Theme, now = Date.now()): string
 		}
 	}
 	const parts: string[] = [];
-	if (running) parts.push(th.fg("accent", `${spinnerFrame(now)}${running}`));
-	if (ok) parts.push(th.fg("success", `✓${ok}`));
-	if (bad) parts.push(th.fg("error", `✗${bad}`));
+	if (running) parts.push(th.fg("accent", `${spinnerFrame(now)} ${running}`));
+	if (ok) parts.push(th.fg("success", `✓ ${ok}`));
+	if (bad) parts.push(th.fg("error", `✗ ${bad}`));
 	return parts.length ? parts.join(" ") : undefined;
 }
 

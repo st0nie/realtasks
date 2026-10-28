@@ -96,7 +96,7 @@ describe("dock", () => {
 			th,
 			FRAME_MS * 2,
 		);
-		expect(s).toBe("✱1 ✓1 ✗1");
+		expect(s).toBe("✱ 1 ✓ 1 ✗ 1");
 	});
 });
 

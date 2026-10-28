@@ -10,7 +10,8 @@ import { cleanOutput, decodeEscapes, encodeKeys, formatDuration, lastLines, last
 import { FRAME_MS } from "../ui.ts";
 import { callLine, humanMs, inputPreview, taskName, waitLine, type WaitDetails } from "./render.ts";
 
-const MAX_WAIT_MS = 600_000;
+/** task_input collects output for at most this long; task_output waits have no cap. */
+const MAX_INPUT_WAIT_MS = 600_000;
 
 type R = AgentToolResult<Record<string, unknown> | undefined>;
 
@@ -50,7 +51,7 @@ async function waitFor(
 	tick: (waitedMs: number) => void,
 ): Promise<WaitDetails["reason"]> {
 	const started = Date.now();
-	const deadline = started + Math.min(MAX_WAIT_MS, Math.max(0, ms));
+	const deadline = started + Math.max(0, ms);
 	let reason: WaitDetails["reason"] = "cap";
 	while (t.running && Date.now() < deadline) {
 		if (signal?.aborted) {
@@ -82,7 +83,7 @@ export function registerTaskTools(rt: Runtime): void {
 		promptSnippet: "Read a background task's new output and status (wait_ms waits for exit or a grep match)",
 		parameters: Type.Object({
 			id: Type.String({ description: "Task id (or unique prefix)" }),
-			wait_ms: Type.Optional(Type.Number({ description: "Max wait, up to 600000; returns early on exit or grep match" })),
+			wait_ms: Type.Optional(Type.Number({ description: "Max wait in ms, no upper limit (e.g. 3600000 = 1h); returns early on exit, grep match, or Esc" })),
 			from: Type.Optional(
 				Type.Union([Type.Literal("cursor"), Type.Literal("start"), Type.Number()], {
 					description: "cursor (default: since last read), start, or a byte offset",
@@ -92,7 +93,7 @@ export function registerTaskTools(rt: Runtime): void {
 			tail_lines: Type.Optional(Type.Number({ description: "Max lines returned (default 200)" })),
 		}),
 		renderCall(args, th) {
-			const cap = typeof args.wait_ms === "number" && args.wait_ms > 0 ? `wait up to ${humanMs(Math.min(MAX_WAIT_MS, args.wait_ms))}` : undefined;
+			const cap = typeof args.wait_ms === "number" && args.wait_ms > 0 ? `wait up to ${humanMs(args.wait_ms)}` : undefined;
 			const grep = typeof args.grep === "string" ? `grep /${args.grep}/` : undefined;
 			return callLine(th, "task_output", taskName(rt, args.id), [cap, grep].filter(Boolean).join(" · ") || undefined);
 		},
@@ -118,7 +119,7 @@ export function registerTaskTools(rt: Runtime): void {
 			const t = m.resolve(p.id);
 			const re = p.grep ? new RegExp(p.grep) : undefined;
 			const start = p.from === "start" ? 0 : typeof p.from === "number" ? Math.max(0, p.from) : t.agentCursor;
-			const capMs = Math.min(MAX_WAIT_MS, Math.max(0, p.wait_ms ?? 0));
+			const capMs = Math.max(0, p.wait_ms ?? 0);
 			const waitStart = Date.now();
 			const base = { label: t.rec.label, id: t.rec.id, capMs };
 			let reason: WaitDetails["reason"] = "none";
@@ -206,7 +207,7 @@ export function registerTaskTools(rt: Runtime): void {
 			if (p.keys?.length) data += encodeKeys(p.keys);
 			if (data) t.write(data);
 			if (p.eof) t.endInput();
-			await sleep(Math.min(MAX_WAIT_MS, Math.max(0, p.wait_ms ?? 750)), signal);
+			await sleep(Math.min(MAX_INPUT_WAIT_MS, Math.max(0, p.wait_ms ?? 750)), signal);
 			t.poll();
 			const end = fileSize(t.rec.logPath);
 			const raw = readRange(t.rec.logPath, Math.min(before, end), end);
