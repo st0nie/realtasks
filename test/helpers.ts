@@ -13,7 +13,8 @@ export interface Sent {
 
 export function tmpDir(prefix = "realtasks-test-"): { dir: string; cleanup: () => void } {
 	const dir = mkdtempSync(join(tmpdir(), prefix));
-	return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+	// Windows: a just-killed task may still hold its cwd or log open for a moment.
+	return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) };
 }
 
 export function testConfig(dir: string, over: Record<string, unknown> = {}): TasksConfig {

@@ -4,7 +4,16 @@ import { rmSync } from "node:fs";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import type { TasksConfig, NotifyPolicy } from "./config.ts";
 import { Notifier, type NotifierDeps, terminalBlock, terminalLevel, terminalSummary, signalBlock } from "./notify.ts";
-import { handleTable, isSameProcess, pidStartTime, readExitFile, spawnTask } from "./proc.ts";
+import {
+	IS_WINDOWS,
+	handleTable,
+	isSameProcess,
+	killGroup,
+	pidStartTime,
+	pidStartTimeAsync,
+	readExitFile,
+	spawnTask,
+} from "./proc.ts";
 import { fileSize, readTail } from "./output.ts";
 import { readRecords, taskPaths, writeRecord } from "./store.ts";
 import { Task, type ExitInfo } from "./task.ts";
@@ -148,11 +157,7 @@ export class TaskManager {
 		this.exitHook = () => {
 			for (const t of this.tasks.values()) {
 				if (!t.running || t.rec.keepAlive) continue;
-				try {
-					process.kill(-t.rec.pgid, "SIGKILL");
-				} catch {
-					/* gone */
-				}
+				killGroup(t.rec.pgid, "SIGKILL", true, t.rec.id);
 				t.rec.status = "stopped";
 				t.rec.endedAt = Date.now();
 				try {
@@ -205,7 +210,14 @@ export class TaskManager {
 		if (!this.sessionId) throw new Error("realtasks: no active session");
 		const id = newTaskId(o.kind === "monitor" ? "m" : "b");
 		const paths = taskPaths(this.cfg.dir, this.sessionId, id);
-		const shell = getShellConfig().shell;
+		const shellConfig = getShellConfig();
+		if (shellConfig.commandTransport === "stdin") {
+			throw new Error(
+				`realtasks cannot run tasks through the WSL bash launcher (${shellConfig.shell}). ` +
+					"Install Git for Windows (https://git-scm.com/download/win) or put MSYS2/Cygwin bash on PATH.",
+			);
+		}
+		const shell = shellConfig.shell;
 		const spawned = spawnTask({
 			id,
 			command: o.executed,
@@ -229,7 +241,8 @@ export class TaskManager {
 			cwd: o.cwd,
 			pid: spawned.pid,
 			pgid: spawned.pid,
-			pidStart: pidStartTime(spawned.pid),
+			// Windows: the lookup is slow, so it is filled in asynchronously below.
+			pidStart: IS_WINDOWS ? "" : pidStartTime(spawned.pid),
 			startedAt: Date.now(),
 			status: "running",
 			logPath: paths.log,
@@ -253,6 +266,13 @@ export class TaskManager {
 		this.tasks.set(id, t);
 		t.start(0);
 		this.persist(t);
+		if (IS_WINDOWS) {
+			void pidStartTimeAsync(spawned.pid).then((start) => {
+				if (!start || !t.running || this.tasks.get(id) !== t) return;
+				t.rec.pidStart = start;
+				this.persist(t);
+			});
+		}
 		if (!o.foreground) this.emitStarted(t);
 		this.events.changed();
 		return t;
@@ -275,7 +295,13 @@ export class TaskManager {
 		t.rec.notified = true;
 		this.tasks.delete(t.rec.id);
 		const p = taskPaths(this.cfg.dir, t.rec.sessionId, t.rec.id);
-		for (const f of [p.json, p.log, p.exit, p.err]) rmSync(f, { force: true });
+		for (const f of [p.json, p.log, p.exit, p.err]) {
+			try {
+				rmSync(f, { force: true });
+			} catch {
+				/* still held open (Windows); the retention sweep removes it */
+			}
+		}
 		this.events.changed();
 	}
 

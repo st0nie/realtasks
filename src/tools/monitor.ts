@@ -4,7 +4,8 @@ import { Type } from "typebox";
 import type { Runtime } from "../runtime.ts";
 import type { Task } from "../task.ts";
 import { eventBlock, signalBlock } from "../notify.ts";
-import { oneLine, stripAnsi } from "../text.ts";
+import { IS_WINDOWS } from "../proc.ts";
+import { oneLine, shQuote, stripAnsi } from "../text.ts";
 import { callLine, humanMs } from "./render.ts";
 
 export const BATCH_MS = 2000;
@@ -150,7 +151,9 @@ export function registerMonitor(rt: Runtime, hub: MonitorHub): void {
 			rt.manager.assertCapacity();
 			const persistent = Boolean(p.persistent);
 			const timeoutMs = persistent ? undefined : Math.max(1000, p.timeout_ms ?? 300_000);
-			const cmd = p.command ?? `tail -n 0 -F ${p.file}`;
+			// Windows: `tail` is not on PATH, so file monitors go through the shell (Git Bash ships tail).
+			const fileViaShell = Boolean(p.file) && IS_WINDOWS;
+			const cmd = p.command ?? (fileViaShell ? `tail -n 0 -F -- ${shQuote(p.file as string)}` : `tail -n 0 -F ${p.file}`);
 			const t = rt.manager.start({
 				kind: "monitor",
 				requested: cmd,
@@ -165,7 +168,7 @@ export function registerMonitor(rt: Runtime, hub: MonitorHub): void {
 				timeoutMs,
 				toolCallId,
 				foreground: false,
-				argv: p.file ? ["tail", "-n", "0", "-F", p.file] : undefined,
+				argv: p.file && !fileViaShell ? ["tail", "-n", "0", "-F", p.file] : undefined,
 				monitor: {
 					file: p.file,
 					filter: p.filter,

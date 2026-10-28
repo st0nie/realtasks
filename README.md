@@ -18,7 +18,15 @@ realtasks replaces `pi-patty-bg-tasks`. Both override `bash`, so remove patty fi
 pi remove npm:pi-patty-bg-tasks
 ```
 
-PTY mode (`tty: true`) needs the optional dependency `@lydell/node-pty`, which installs automatically where a prebuilt binary exists. Linux and macOS only.
+PTY mode (`tty: true`) needs the optional dependency `@lydell/node-pty`, which installs automatically where a prebuilt binary exists (Linux, macOS and Windows x64/arm64).
+
+### Windows
+
+realtasks runs on Linux, macOS and Windows. On Windows, tasks run in the same bash that Pi's built-in `bash` tool uses: [Git for Windows](https://git-scm.com/download/win), or MSYS2/Cygwin bash on PATH. `bash` itself does not need to be on PATH. The WSL launcher (`System32\bash.exe`) is not supported.
+
+- Commands are bash commands, so MSYS path conversion applies. Write `cmd //c ver`, not `cmd /c ver`.
+- `task_stop` and timeouts always force-kill every process of the task (Windows has no SIGTERM for console programs), so `grace_ms` has no effect.
+- PTY mode uses ConPTY.
 
 ## How `bash` behaves
 
@@ -39,7 +47,7 @@ Output goes to `~/.pi/agent/tasks/<session>/<id>.log`. Logs rotate at 50 MB and 
 | --- | --- |
 | `task_output` | New output since the last read. `wait_ms` waits for exit or a `grep` match. `from: "start"` rereads from the beginning |
 | `task_input` | Send `text` (C escapes such as `\r` and `\x03`) or `keys` (`ctrl-c`, `enter`, `up`), or `eof` |
-| `task_stop` | SIGTERM the process group, then SIGKILL after `grace_ms`. Accepts an id or `all` |
+| `task_stop` | SIGTERM the process group, then SIGKILL after `grace_ms` (Windows: force-kills all of the task's processes at once). Accepts an id or `all` |
 | `task_list` | Ids, status, age, label, unread outcomes |
 | `monitor` | Each stdout line of a command, or each new line of a file, matching `filter` becomes a `<task-event>`, batched every 2 s and rate-capped |
 
@@ -49,12 +57,12 @@ Output goes to `~/.pi/agent/tasks/<session>/<id>.log`. Logs rotate at 50 MB and 
 
   ```
   ● Tasks (2 running · 1 done)
-  ├─ ✳ bxomyvwe npm test · 42s │ test 31 ok
+  ├─ ✱ bxomyvwe npm test · 42s │ test 31 ok
   ├─ ◉ mshcwo0p app errors · 12s │ ERROR boom 3
   └─ ✓ b2ywygi6 build · exit 0 · 8s
   ```
 
-  Finished rows stay for 10 s. The status line shows the running count and unread finished counts (`✳2 ✓1 ✗1`).
+  Finished rows stay for 10 s. The status line shows the running count and unread finished counts (`✱2 ✓1 ✗1`).
 - `ctrl+shift+b` or `/bg` sends running foreground commands to the background. Typing a message while one runs does the same.
 - `shift+down` or `/tasks` opens the manager. Its keys are `k` stop, `i` input, `r` restart, `c` copy log path, `x` clear finished, and `enter` follow.
 - `/bg <cmd>` starts a task yourself. Its completion never wakes the agent.

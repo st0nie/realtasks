@@ -16,7 +16,7 @@ realtasks is one Pi extension that merges Claude Code's background model (fire, 
 - rtk keeps compressing output for finite commands, and never breaks streaming ones.
 - Small: no tmux, one optional native dep (PTY), under \~3k lines.
 
-**Success criteria**: the seven acceptance flows in the Acceptance tests section pass on macOS and Linux with rtk installed and not installed.
+**Success criteria**: the seven acceptance flows in the Acceptance tests section pass on macOS, Linux and Windows (Git Bash) with rtk installed and not installed.
 
 ## Prior art and gaps
 
@@ -101,7 +101,7 @@ Write to stdin or the PTY, then return output produced in a short window. `text`
 
 ### monitor
 
-Streaming watch: each stdout line that matches `filter` becomes an event delivered to the agent. Params: `command` or `file` (follows a file without a shell), `filter` regex, `description` (required), `timeout_ms` (default 300000), `persistent`, `max_events_per_min` (default 20; above it the monitor auto-stops and says so).
+Streaming watch: each stdout line that matches `filter` becomes an event delivered to the agent. Params: `command` or `file` (follows a file without a shell; on Windows through the shell, see Windows), `filter` regex, `description` (required), `timeout_ms` (default 300000), `persistent`, `max_events_per_min` (default 20; above it the monitor auto-stops and says so).
 
 ## Notifications
 
@@ -164,8 +164,8 @@ Every task runs detached in its own process group with output going straight to 
 
 **Spawn**
 
-- Same shell the built-in `bash` uses, run through a tiny wrapper: `sh -c '<shell> -c "$PI_TASK_CMD"; printf %s $? > "$PI_TASK_EXIT"'`. The exit file is what lets a re-adopted task report its real exit code.
-- `detached: true` (new process group), stdio = `['ignore' | 'pipe', logFd, logFd]`. The log is opened `O_APPEND` so rotation can truncate it safely. Stdin is a pipe only when `bash` is called with `stdin: true` (default false, so a stray `cat` never hangs on an open pipe); PTY mode (`tty: true`) uses node-pty instead.
+- Same shell the built-in `bash` uses, run through a tiny wrapper: `sh -c '<shell> -c "$PI_TASK_CMD"; printf %s $? > "$PI_TASK_EXIT"'`. The exit file is what lets a re-adopted task report its real exit code. On Windows there is no `/bin/sh`, so the resolved bash runs the wrapper itself (see Windows).
+- `detached: true` (new process group), `windowsHide: true`, stdio = `['ignore' | 'pipe', logFd, logFd]`. The log is opened `O_APPEND` so rotation can truncate it safely. Stdin is a pipe only when `bash` is called with `stdin: true` (default false, so a stray `cat` never hangs on an open pipe); PTY mode (`tty: true`) uses node-pty instead.
 - Live output is read by polling the log size every 250 ms, the same path for fresh and re-adopted tasks.
 - Env: inherited, plus `PI_TASK_ID`, and in pipe mode `PAGER=cat`, `GIT_PAGER=cat`, `TERM=dumb` so pagers never hang a task.
 - Foreground and background are the same spawn. "Foreground" only means `bash` is still awaiting it, so promotion moves nothing; it just stops awaiting.
@@ -174,7 +174,7 @@ Every task runs detached in its own process group with output going straight to 
 
 **Stopping**
 
-- `SIGTERM` to the process group (`process.kill(-pgid)`), then `SIGKILL` after `grace_ms`. Windows: `taskkill /T`, then `/F`.
+- `SIGTERM` to the process group (`process.kill(-pgid)`), then `SIGKILL` after `grace_ms`. Windows: forced `taskkill` of every process carrying the task's `PI_TASK_ID`, at once (see Windows).
 - Esc during a foreground `bash` kills it (user cancel). Ctrl+Shift+B, a typed message, or the yield window ending promote it instead. Same split as Claude Code.
 - `timeout` kills and ends the task as `timed_out`, never as `failed`.
 
@@ -195,9 +195,17 @@ Every task runs detached in its own process group with output going straight to 
 
 **Reload handoff**: `/reload` keeps the same Node process, so live handles (stdin pipe, PTY, `ChildProcess`) are parked in a `globalThis[Symbol.for("realtasks.handles")]` table on `session_shutdown` with reason `reload` and picked up by the new runtime. Only raw handles cross the boundary, never objects built by the old module code, so new code always rebuilds its own task state from the `<taskId>.json` records.
 
-**Re-adoption** on `session_start`: read `<taskId>.json` records for this session; for each `running` one, confirm the PID is alive and its start time matches the record (guards against PID reuse; Linux reads `/proc/<pid>/stat`, macOS `ps -o lstart=`), then resume tailing the log and polling liveness every 1 s. Dead with an exit file → finalized and notified (`passive`, since the agent may be on another topic). Dead without one → `lost`. The registry is also mirrored with `pi.appendEntry("realtasks", …)` so the transcript shows when tasks started and ended across reloads: `{event: "started", id, kind, label, command}` when a task is created or a foreground command is promoted, `{event: "ended", id, status, exitCode?, signal?}` when a task ends, and `{event: "readopted", reason, running, finished}` after re-adoption. Foreground commands that finish inside the yield window are not tasks and get no entries. These entries are not sent to the model.
+**Re-adoption** on `session_start`: read `<taskId>.json` records for this session; for each `running` one, confirm the PID is alive and its start time matches the record (guards against PID reuse; Linux reads `/proc/<pid>/stat`, macOS `ps -o lstart=`, Windows asks PowerShell), then resume tailing the log and polling liveness every 1 s. Dead with an exit file → finalized and notified (`passive`, since the agent may be on another topic). Dead without one → `lost`. The registry is also mirrored with `pi.appendEntry("realtasks", …)` so the transcript shows when tasks started and ended across reloads: `{event: "started", id, kind, label, command}` when a task is created or a foreground command is promoted, `{event: "ended", id, status, exitCode?, signal?}` when a task ends, and `{event: "readopted", reason, running, finished}` after re-adoption. Foreground commands that finish inside the yield window are not tasks and get no entries. These entries are not sent to the model.
 
-Windows is not supported.
+**Windows.** Supported with the bash Pi's own `bash` tool resolves on Windows (`getShellConfig()`: Git for Windows, then `bash.exe` on PATH such as MSYS2 or Cygwin). Commands are bash commands, exactly like Pi's built-in tool there, so MSYS path conversion applies (`cmd //c`, not `cmd /c`).
+
+- **Spawn**: the resolved bash runs the wrapper, and the wrapper starts a second bash for the command, so the exit file works as on Unix. The wrapper travels in `$PI_TASK_WRAPPER` and the command line is only `bash -c 'eval "$PI_TASK_WRAPPER"'`, because node-pty's Windows command-line quoting garbles the wrapper's nested double quotes for MSYS bash.
+- **Log fd**: MSYS and Cygwin programs fail every write to the append-only handle Node creates for `O_APPEND` (the command exits 1 with no output). So on Windows Node opens the log without `O_APPEND` and the wrapper first reopens its own output with bash: `exec >>"$PI_TASK_LOG" 2>&1` (or `2>>"$PI_TASK_ERR"` for monitors). Cygwin's append handle works for MSYS and native programs alike, including MSYS programs started by native ones. The wrapper starts the command with `"$BASH"` (MSYS bash itself, not Git's native `bin\bash.exe` launcher), so the MSYS-to-MSYS spawn keeps `O_APPEND` and MSYS programs keep writing at the end after rotation truncates the log. Known limit: a native (non-MSYS) program that keeps writing across a rotation still writes at its old offset, which leaves a run of NUL bytes where the dropped head was. The file stays bounded by the cap (the next rotation cuts it again), and the tailer drops NUL bytes from what it reads, so the ring, previews, notifications and monitor events never contain them; only the raw log file does. `detached: true` gives the task its own process group and hidden console, outside Node's job object, so Ctrl+C in Pi's terminal never reaches a task and `keep_alive` tasks outlive Pi. The WSL launcher (`System32\bash.exe`, which Pi feeds through stdin) cannot see the `PI_TASK_*` environment, so it is rejected with an error that says to install Git for Windows.
+- **Stopping**: Windows has no process groups or POSIX signals, and `taskkill /T` alone is not enough: MSYS `exec` replaces a process with a new Windows process whose Windows parent is gone, so the Windows process tree breaks at every exec and the command is no longer below the root. realtasks therefore finds the task's processes the way MSYS sees them: a bash scan of `/proc/*/environ` (builtins only, about 100 ms) lists the Windows pid (`/proc/<pid>/winpid`) of every MSYS process whose environment holds `PI_TASK_ID=<id>`. One `taskkill /F /T` then ends the root and every match, and with `/T` the native programs below them; a second scan and kill catches anything forked meanwhile. A task that clears `PI_TASK_ID` escapes, just as `setsid` escapes the process group on Unix. Every signal is forced and `grace_ms` has no effect: `taskkill` without `/F` cannot end console programs, and when it does end the root (MSYS turns the close request into a signal) the children are orphaned. It runs asynchronously; a stop with no grace (quit and session switch) and the `process.on("exit")` handler run it synchronously, because asynchronous work never runs once Pi exits. Statuses follow the same rules as on Unix (`stopped`, `timed_out`).
+- **PID identity**: the start time comes from PowerShell, `(Get-Process -Id <pid>).StartTime.ToFileTimeUtc()`. That takes about 300 ms, so it is fetched asynchronously after spawn (the record is persisted again once it arrives) and checked synchronously only during re-adoption. The 1 s liveness poll of a re-adopted task uses `process.kill(pid, 0)` alone.
+- **File monitors**: `tail` is not on the Windows PATH, so a `file` monitor runs `tail -n 0 -F -- '<file>'` through the shell (Git Bash and MSYS2 ship `tail`) instead of spawning it directly.
+- **PTY**: node-pty uses ConPTY. It takes no signals, so stopping a PTY task kills its processes as above and closes the pseudo console with `pty.kill()` (no signal argument).
+- **Files**: other processes (a daemonized grandchild, a virus scanner) may hold task files open. Record writes retry the atomic rename a few times and then write in place; deleting the files of a foreground command that finished in its window ignores files that are still busy (the retention sweep removes them later).
 
 ## rtk compatibility (official Pi hook)
 
@@ -250,12 +258,12 @@ The user sees what is running at a glance and can take over any task without ask
 
   ```
   ● Tasks (2 running · 1 done)
-  ├─ ✳ bxomyvwe npm test · 42s │ test 31 ok
+  ├─ ✱ bxomyvwe npm test · 42s │ test 31 ok
   ├─ ◉ mshcwo0p app errors · 12s │ ERROR boom 3
   └─ ✓ b2ywygi6 build · exit 0 · 8s
   ```
 
-  The heading is `●` in the accent color while anything runs, `○` dim otherwise. Each row has a status glyph, the id (dim), the label, the elapsed or total time, and for running tasks the latest output line after a dim `│`. Running shell and PTY tasks show an animated star spinner in the style of Claude Code (`·✢✳✶✻✽` played forward then back, one frame per 120 ms). It is deliberately not Pi's braille spinner, so task activity looks different from Pi's own "Working" indicator. Running monitors pulse between `◉` and `◎`. Finished tasks stay for 10 s after they end with `✓` (completed), `✗` (failed, timed out), `■` (stopped) or `?` (lost), then drop out. At most 5 task rows; the rest collapse into `└─ +N more · /tasks`. The last row uses `└─`, and one blank line follows the panel so it does not touch the editor. The dock is hidden when nothing is running or lingering, and the animation timer runs only while the dock is shown. The status line carries the spinner frame and the running count (`✳2`) plus `✓2 ✗1` counts for unread finished tasks.
+  The heading is `●` in the accent color while anything runs, `○` dim otherwise. Each row has a status glyph, the id (dim), the label, the elapsed or total time, and for running tasks the latest output line after a dim `│`. Running shell and PTY tasks show an animated star spinner in the style of Claude Code (`·✢✱✶✻✽` played forward then back, one frame per 120 ms). Every frame is a text-only glyph: Claude Code's `✳` (U+2733) is an emoji character, and terminals that fall back to a color emoji font (Windows Terminal, some Linux setups) draw it as a double-width color emoji that also overwrites the next cell; `✱` (U+2731) takes its place. It is deliberately not Pi's braille spinner, so task activity looks different from Pi's own "Working" indicator. Running monitors pulse between `◉` and `◎`. Finished tasks stay for 10 s after they end with `✓` (completed), `✗` (failed, timed out), `■` (stopped) or `?` (lost), then drop out. At most 5 task rows; the rest collapse into `└─ +N more · /tasks`. The last row uses `└─`, and one blank line follows the panel so it does not touch the editor. The dock is hidden when nothing is running or lingering, and the animation timer runs only while the dock is shown. The status line carries the spinner frame and the running count (`✱2`) plus `✓2 ✗1` counts for unread finished tasks.
 - **`/tasks` manager** (`ctx.ui.custom` overlay): list on the left, live log on the right. Keys: `↑↓` select, `enter` toggle follow, `pgup`/`pgdn` scroll, `k` stop, `i` send input (prompts for text, C escapes decoded), `r` restart with the same command, `c` copy log path, `x` clear finished, `esc` close. Restart stops the task if it is running, then starts a new user task (as `/bg <cmd>`) with the same executed command, cwd, `tty` and `stdin`; the new task gets a new id. Opening the manager marks finished tasks as seen by the user (clears the `✓`/`✗` status counts) without touching the agent's `notified` latch.
 - **Cooperative steering**: typing a message while a foreground `bash` runs promotes it to a task, aborts the turn and delivers the message as a fresh user turn (patty's behavior, Claude Code parity). Opt-out via `steerPromotes: false`.
 
@@ -302,7 +310,7 @@ Ship the Claude Code core first; Codex-style interaction and durability follow o
 3. **v0.3 Durability**: re-adoption across `/reload`, `keep_alive`, print-mode settle handling, log retention.
 4. **v0.4 Streams**: `monitor` (command and file sources), event batching and flood stop.
 
-**Non-goals**: background subagents (`agent_bg`), WebSocket monitors, tmux or any external process manager, blocking `sleep` commands, shipping rtk rewrite logic, Windows PTY.
+**Non-goals**: background subagents (`agent_bg`), WebSocket monitors, tmux or any external process manager, blocking `sleep` commands, shipping rtk rewrite logic, PowerShell or `cmd.exe` as the task shell on Windows.
 
 ## Acceptance tests
 
@@ -326,11 +334,12 @@ Resolved from the original open questions:
 - Name: `realtasks` (npm package and extension name). It replaces `pi-patty-bg-tasks`; both override `bash`, so only one may be installed.
 - Session switch stops pipe-mode tasks (TUI asks first); `keep_alive` tasks keep running.
 - `monitor` ships (v0.4 scope is in).
-- Linux and macOS only. Windows is out of scope for now.
+- Linux, macOS and Windows. On Windows tasks run in the same bash Pi's built-in `bash` tool uses (Git for Windows, MSYS2 or Cygwin); the WSL launcher is not supported.
 - rtk original-command recovery uses both step 1 (own `tool_call` stash) and step 2 (assistant message on the branch); Pi persists the assistant message at `message_end`, before tool execution starts.
 
 ## Development
 
 - Bun for development: `bun install`, `bun test`, `bunx tsc --noEmit`.
 - Pi runs extensions on Node. `@lydell/node-pty` does not work under the Bun runtime (the child exits at once), so the PTY test runs its scenario in a `node --experimental-strip-types` subprocess (`test/pty-node.ts`); everything else runs in `bun test`.
+- Windows: the tests need Git for Windows (its bash runs every task command; `bash` itself need not be on PATH). The PTY scenario starts `python` instead of `python3` there, since Windows installs rarely provide `python3`.
 - Every change edits this spec first, then the code.
