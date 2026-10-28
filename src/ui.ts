@@ -12,8 +12,12 @@ import type { NotificationDetails } from "./notify.ts";
 export const DOCK_WIDGET = "realtasks-dock";
 export const STATUS_KEY = "realtasks";
 
-/** Claude Code-style star twinkle, played forward then back (not Pi's braille spinner). */
-const STAR = ["·", "✢", "✳", "✶", "✻", "✽"];
+/**
+ * Claude Code-style star twinkle, played forward then back (not Pi's braille spinner).
+ * Text-only glyphs: Claude Code's ✳ (U+2733) renders as a double-width color emoji
+ * on Windows Terminal and emoji-font terminals, so ✱ (U+2731) replaces it.
+ */
+const STAR = ["·", "✢", "✱", "✶", "✻", "✽"];
 export const SPINNER = [...STAR, ...STAR.slice(1, -1).reverse()];
 export const FRAME_MS = 120;
 export const LINGER_MS = 10_000;
