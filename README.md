@@ -55,26 +55,24 @@ Shortcuts never take a key Pi already binds (`ctrl+b`, for example, is cursor-le
 
 ## Configuration
 
-Settings live under `tasks` in `~/.pi/agent/settings.json`, or in `.pi/settings.json` per project.
+Config lives in `~/.pi/agent/realtasks/config.json` (optional; missing means defaults). A trusted project can override keys in `.pi/realtasks/config.json`. realtasks does not read Pi's `settings.json`.
 
 ```json
 {
-  "tasks": {
-    "yieldMs": 30000,
-    "maxRunning": 16,
-    "maxLogBytes": 52428800,
-    "logRetentionDays": 7,
-    "stallSeconds": 45,
-    "defaultNotify": "wake",
-    "printModeMaxWaitMs": 600000,
-    "steerPromotes": true,
-    "rtkPassthroughFor": ["ready", "tty"],
-    "shortcuts": { "background": "ctrl+shift+b", "manager": "shift+down" }
-  }
+  "yieldMs": 30000,
+  "maxRunning": 16,
+  "maxLogBytes": 52428800,
+  "logRetentionDays": 7,
+  "stallSeconds": 45,
+  "defaultNotify": "wake",
+  "printModeMaxWaitMs": 600000,
+  "steerPromotes": true,
+  "rtkPassthroughFor": ["ready", "tty"],
+  "shortcuts": { "background": "ctrl+shift+b", "manager": "shift+down" }
 }
 ```
 
-Set a shortcut to `"off"` to disable it. Shortcut changes take effect on `/reload`.
+Set a shortcut to `"off"` to disable it. Config changes take effect on `/reload`.
 
 ## Development
 

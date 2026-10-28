@@ -18,7 +18,6 @@ const SETTLE_POLL_MS = 250;
 
 export default function realtasks(pi: ExtensionAPI): void {
 	const rt = new Runtime(pi);
-	rt.loadConfig();
 	const hub = new MonitorHub(rt);
 
 	registerBash(rt);
@@ -34,6 +33,13 @@ export default function realtasks(pi: ExtensionAPI): void {
 		(t, line) => hub.line(t, line),
 		(t) => hub.end(t),
 	);
+	rt.manager.setLifecycleHook((entry) => {
+		try {
+			pi.appendEntry(ENTRY_TYPE, entry);
+		} catch {
+			/* stale runtime during shutdown */
+		}
+	});
 
 	pi.registerMessageRenderer<NotificationDetails>(NOTIFICATION_TYPE, (message, options, theme) =>
 		renderNotification(
@@ -54,7 +60,11 @@ export default function realtasks(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (event, ctx) => {
 		rt.ctx = ctx;
-		rt.loadConfig();
+		const configWarnings = rt.loadConfig(ctx.cwd, ctx.isProjectTrusted());
+		for (const w of configWarnings) {
+			if (ctx.hasUI) ctx.ui.notify(w, "warning");
+			else console.error(w);
+		}
 		if (!shortcutsBound && ctx.mode === "tui") {
 			shortcutsBound = true;
 			for (const w of registerShortcuts(pi, rt)) ctx.ui.notify(w, "warning");

@@ -1,17 +1,18 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import realtasks from "../index.ts";
 import { handleTable, loadPty } from "../src/proc.ts";
-import { fakeCtx, fakePi, tmpDir, until } from "./helpers.ts";
+import { fakeCtx, fakePi, tmpDir, until, writeUserConfig } from "./helpers.ts";
 
 type Res = { content: Array<{ text: string }>; details?: Record<string, unknown>; isError?: boolean };
 
 const { dir, cleanup } = tmpDir();
+const agentDir = writeUserConfig({ dir, yieldMs: 1000 });
 let env: ReturnType<typeof setup>;
 
 function setup(sessionId = "s-int") {
-	const f = fakePi({ tasks: { dir, yieldMs: 1000 } });
+	const f = fakePi();
 	realtasks(f.pi as never);
 	const c = fakeCtx(dir, sessionId, "print");
 	const call = async (name: string, params: Record<string, unknown>, id = `call-${Math.random()}`) => {
@@ -29,6 +30,7 @@ beforeAll(async () => {
 afterAll(async () => {
 	await env.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, env.ctx);
 	cleanup();
+	rmSync(agentDir, { recursive: true, force: true });
 });
 
 const text = (r: Res) => r.content.map((c) => c.text).join("");
@@ -69,6 +71,11 @@ describe("bash override", () => {
 		expect(settle.continue).toBe(true);
 		expect(settle.entries[0].content).toContain(`id="${id}" status="completed" exit="0"`);
 		expect(settle.entries[0].content).toContain("finished");
+		const mine = env.entries.filter((e) => e.type === "realtasks" && (e.data as { id?: string }).id === id).map((e) => e.data);
+		expect(mine).toEqual([
+			expect.objectContaining({ event: "started", id, kind: "shell" }),
+			expect.objectContaining({ event: "ended", id, status: "completed", exitCode: 0 }),
+		]);
 		const again = await env.emit("agent_before_settle", { type: "agent_before_settle", entries: [], continue: false }, env.ctx);
 		expect(again).toBeUndefined();
 	});

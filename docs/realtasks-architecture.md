@@ -195,7 +195,7 @@ Every task runs detached in its own process group with output going straight to 
 
 **Reload handoff**: `/reload` keeps the same Node process, so live handles (stdin pipe, PTY, `ChildProcess`) are parked in a `globalThis[Symbol.for("realtasks.handles")]` table on `session_shutdown` with reason `reload` and picked up by the new runtime. Only raw handles cross the boundary, never objects built by the old module code, so new code always rebuilds its own task state from the `<taskId>.json` records.
 
-**Re-adoption** on `session_start`: read `<taskId>.json` records for this session; for each `running` one, confirm the PID is alive and its start time matches the record (guards against PID reuse; Linux reads `/proc/<pid>/stat`, macOS `ps -o lstart=`), then resume tailing the log and polling liveness every 1 s. Dead with an exit file → finalized and notified (`passive`, since the agent may be on another topic). Dead without one → `lost`. The registry is also mirrored with `pi.appendEntry` so the transcript shows when tasks started and ended across reloads.
+**Re-adoption** on `session_start`: read `<taskId>.json` records for this session; for each `running` one, confirm the PID is alive and its start time matches the record (guards against PID reuse; Linux reads `/proc/<pid>/stat`, macOS `ps -o lstart=`), then resume tailing the log and polling liveness every 1 s. Dead with an exit file → finalized and notified (`passive`, since the agent may be on another topic). Dead without one → `lost`. The registry is also mirrored with `pi.appendEntry("realtasks", …)` so the transcript shows when tasks started and ended across reloads: `{event: "started", id, kind, label, command}` when a task is created or a foreground command is promoted, `{event: "ended", id, status, exitCode?, signal?}` when a task ends, and `{event: "readopted", reason, running, finished}` after re-adoption. Foreground commands that finish inside the yield window are not tasks and get no entries. These entries are not sent to the model.
 
 Windows is not supported.
 
@@ -258,13 +258,13 @@ The user sees what is running at a glance and can take over any task without ask
 | `/tasks` | Open the manager |
 | `/tasks stop <id or all>` | Stop from the command line |
 
-**No conflicts with Pi's keybindings.** realtasks never takes a key Pi binds by default (for example `ctrl+b` is cursor-left, `ctrl+shift+up`/`down` jump between prompts) or one the user bound in `keybindings.json`. The defaults `ctrl+shift+b` and `shift+down` are unbound in Pi. At load, each configured shortcut is checked against Pi's resolved keybindings (`getKeybindings().getResolvedBindings()`, which merges defaults and user bindings); a clashing shortcut is not registered and a warning names the Pi action it would shadow and the `tasks.shortcuts.*` key to change. `/bg` and `/tasks` always remain available. Every shortcut is remappable in settings, and `off` disables it.
+**No conflicts with Pi's keybindings.** realtasks never takes a key Pi binds by default (for example `ctrl+b` is cursor-left, `ctrl+shift+up`/`down` jump between prompts) or one the user bound in `keybindings.json`. The defaults `ctrl+shift+b` and `shift+down` are unbound in Pi. At load, each configured shortcut is checked against Pi's resolved keybindings (`getKeybindings().getResolvedBindings()`, which merges defaults and user bindings); a clashing shortcut is not registered and a warning names the Pi action it would shadow and the `shortcuts.*` key in `realtasks/config.json` to change. `/bg` and `/tasks` always remain available. Every shortcut is remappable in that config, and `off` disables it.
 
 Non-TUI modes: tools and notifications behave the same; dock, overlay and shortcuts are skipped (`ctx.mode !== "tui"`); RPC clients get notifications through `ctx.ui.notify` where supported.
 
 ## Configuration
 
-All keys live under `tasks` in `~/.pi/agent/settings.json`, overridable per project in `.pi/settings.json` (project values apply only once Pi trusts the workspace).
+All keys live in `<agentDir>/realtasks/config.json` (default `~/.pi/agent/realtasks/config.json`; `PI_CODING_AGENT_DIR` moves it). A trusted project can override keys in `.pi/realtasks/config.json`; project values apply only when `ctx.isProjectTrusted()` is true. The file is optional; a missing file means defaults. Invalid JSON or a non-object top level is reported once with a warning and that file is ignored; invalid individual values fall back to their defaults. Config is read at `session_start`, so edits take effect on `/reload`. realtasks does not read Pi's `settings.json`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

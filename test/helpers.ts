@@ -1,6 +1,6 @@
 // Fake ExtensionAPI / ctx and a temp task dir for unit tests.
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveConfig, type TasksConfig } from "../src/config.ts";
@@ -22,8 +22,20 @@ export function testConfig(dir: string, over: Record<string, unknown> = {}): Tas
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
+/**
+ * Point PI_CODING_AGENT_DIR at a temp agent dir and write
+ * <agentDir>/realtasks/config.json, the only place realtasks reads config.
+ */
+export function writeUserConfig(config: Record<string, unknown>): string {
+	const agent = mkdtempSync(join(tmpdir(), "realtasks-agent-"));
+	mkdirSync(join(agent, "realtasks"), { recursive: true });
+	writeFileSync(join(agent, "realtasks", "config.json"), JSON.stringify(config));
+	process.env.PI_CODING_AGENT_DIR = agent;
+	return agent;
+}
+
 /** Minimal ExtensionAPI capturing registrations and sent messages. */
-export function fakePi(settings: Record<string, unknown> = {}) {
+export function fakePi() {
 	const tools = new Map<string, { execute: (...a: unknown[]) => Promise<unknown> } & Record<string, unknown>>();
 	const handlers = new Map<string, Handler[]>();
 	const sent: Sent[] = [];
@@ -45,7 +57,7 @@ export function fakePi(settings: Record<string, unknown> = {}) {
 		sendMessage: (m: { content: string; details: unknown }, opts: unknown) => sent.push({ content: m.content, details: m.details, opts }),
 		sendUserMessage: (content: unknown, opts: unknown) => userMessages.push({ content, opts }),
 		appendEntry: (type: string, data: unknown) => entries.push({ type, data }),
-		getSettings: () => settings,
+		getSettings: () => ({}),
 	};
 	const emit = async (ev: string, event: unknown, ctx: unknown) => {
 		let last: unknown;
@@ -78,6 +90,7 @@ export function fakeCtx(cwd: string, sessionId = "sess1", mode: "tui" | "print" 
 			aborted++;
 		},
 		isIdle: () => true,
+		isProjectTrusted: () => false,
 		signal: undefined,
 	};
 	return { ctx, notes, aborted: () => aborted };

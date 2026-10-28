@@ -2,16 +2,17 @@
 // Usage: node --experimental-strip-types test/pty-node.ts <tmpdir>
 // Prints "PTY_OK" on success, otherwise an error and a non-zero exit.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import realtasks from "../index.ts";
-import { fakeCtx, fakePi, until } from "./helpers.ts";
+import { fakeCtx, fakePi, until, writeUserConfig } from "./helpers.ts";
 
 type Res = { content: Array<{ text: string }> };
 
 const dir = process.argv[2];
 if (!dir) throw new Error("usage: pty-node.ts <dir>");
-const f = fakePi({ tasks: { dir } });
+const agentDir = writeUserConfig({ dir });
+const f = fakePi();
 realtasks(f.pi as never);
 const c = fakeCtx(dir, "s-pty", "print");
 const call = async (name: string, params: Record<string, unknown>) =>
@@ -31,5 +32,6 @@ if (!end.includes("completed exit=0")) throw new Error(`expected completed: ${en
 const stall = f.sent.some((s) => s.content.includes('signal="stall"'));
 if (stall) throw new Error("unexpected stall warning");
 await f.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, c.ctx);
+rmSync(agentDir, { recursive: true, force: true });
 console.log("PTY_OK");
 process.exit(0);

@@ -9,7 +9,7 @@ import { fileSize, readTail } from "./output.ts";
 import { readRecords, taskPaths, writeRecord } from "./store.ts";
 import { Task, type ExitInfo } from "./task.ts";
 import { cleanOutput, lastNonEmptyLine, looksLikePrompt, newTaskId, oneLine } from "./text.ts";
-import type { MonitorSpec, ReadySpec, TaskKind, TaskRecord } from "./types.ts";
+import type { MonitorSpec, ReadySpec, TaskKind, TaskRecord, TaskStatus } from "./types.ts";
 
 export interface StartOptions {
 	kind: TaskKind;
@@ -39,7 +39,13 @@ export interface ManagerEvents {
 	monitorLine?(task: Task, line: string): void;
 	/** Monitor exited: flush its pending events before the terminal notice. */
 	monitorEnd?(task: Task): void;
+	/** Task started or ended; mirrored into the transcript with pi.appendEntry. */
+	lifecycle?(entry: LifecycleEntry): void;
 }
+
+export type LifecycleEntry =
+	| { event: "started"; id: string; kind: TaskKind; label: string; command: string }
+	| { event: "ended"; id: string; status: TaskStatus; exitCode?: number; signal?: string };
 
 export class TaskManager {
 	readonly tasks = new Map<string, Task>();
@@ -130,6 +136,7 @@ export class TaskManager {
 			t.rec.notified = true;
 			t.markDone(t.rec);
 			this.persist(t);
+			if (!t.rec.foreground) this.emitEnded(t);
 		}
 		this.tasks.clear();
 		this.removeExitHook();
@@ -168,6 +175,11 @@ export class TaskManager {
 	setMonitorHooks(line: NonNullable<ManagerEvents["monitorLine"]>, end: NonNullable<ManagerEvents["monitorEnd"]>): void {
 		this.events.monitorLine = line;
 		this.events.monitorEnd = end;
+	}
+
+	/** Install the transcript mirror (set by the extension entry point). */
+	setLifecycleHook(fn: NonNullable<ManagerEvents["lifecycle"]>): void {
+		this.events.lifecycle = fn;
 	}
 
 	// ── spawning ────────────────────────────────────────────────
@@ -241,6 +253,7 @@ export class TaskManager {
 		this.tasks.set(id, t);
 		t.start(0);
 		this.persist(t);
+		if (!o.foreground) this.emitStarted(t);
 		this.events.changed();
 		return t;
 	}
@@ -249,6 +262,7 @@ export class TaskManager {
 	promote(t: Task): void {
 		if (!t.rec.foreground) return;
 		t.rec.foreground = false;
+		this.emitStarted(t);
 		this.persist(t);
 		this.events.changed();
 	}
@@ -370,7 +384,9 @@ export class TaskManager {
 		this.persist(t);
 		this.events.changed();
 		// Foreground commands report through the bash result instead.
-		if (t.rec.foreground || t.rec.notified) return;
+		if (t.rec.foreground) return;
+		this.emitEnded(t);
+		if (t.rec.notified) return;
 		this.notifier.queue({
 			id: t.rec.id,
 			kind: "terminal",
@@ -379,6 +395,16 @@ export class TaskManager {
 			summary: terminalSummary(t.rec),
 			level: terminalLevel(t.rec),
 		});
+	}
+
+	private emitStarted(t: Task): void {
+		const r = t.rec;
+		this.events.lifecycle?.({ event: "started", id: r.id, kind: r.kind, label: r.label, command: r.executed });
+	}
+
+	private emitEnded(t: Task): void {
+		const r = t.rec;
+		this.events.lifecycle?.({ event: "ended", id: r.id, status: r.status, exitCode: r.exitCode, signal: r.signal });
 	}
 
 	// ── stall detection ─────────────────────────────────────────

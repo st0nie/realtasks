@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { resolveConfig, DEFAULTS } from "../src/config.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DEFAULTS, loadConfig, mergeConfig, resolveConfig } from "../src/config.ts";
 import { Notifier, type NoticeItem, terminalBlock } from "../src/notify.ts";
 import { commandFromBranch, recoverCommand, stashCommand } from "../src/rtk.ts";
 import { findKeyConflict } from "../src/commands.ts";
@@ -63,6 +66,57 @@ describe("config", () => {
 		expect(c.shortcuts.background).toBe("off");
 		expect(c.shortcuts.manager).toBe("shift+down");
 		expect(c.maxRunning).toBe(2);
+	});
+});
+
+describe("config file", () => {
+	const write = (p: string, body: string) => {
+		mkdirSync(join(p, ".."), { recursive: true });
+		writeFileSync(p, body);
+	};
+	test("reads <agentDir>/realtasks/config.json; project applies only when trusted", () => {
+		const agent = mkdtempSync(join(tmpdir(), "rt-cfg-agent-"));
+		const proj = mkdtempSync(join(tmpdir(), "rt-cfg-proj-"));
+		const prev = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = agent;
+		try {
+			expect(loadConfig(proj, false).config.yieldMs).toBe(DEFAULTS.yieldMs);
+			write(join(agent, "realtasks", "config.json"), JSON.stringify({ yieldMs: 5000, shortcuts: { manager: "off" } }));
+			write(join(proj, ".pi", "realtasks", "config.json"), JSON.stringify({ yieldMs: 9000, shortcuts: { background: "alt+b" } }));
+			const untrusted = loadConfig(proj, false).config;
+			expect(untrusted.yieldMs).toBe(5000);
+			expect(untrusted.shortcuts).toEqual({ background: "ctrl+shift+b", manager: "off" });
+			const trusted = loadConfig(proj, true).config;
+			expect(trusted.yieldMs).toBe(9000);
+			expect(trusted.shortcuts).toEqual({ background: "alt+b", manager: "off" });
+			expect(trusted.dir).toBe(join(agent, "tasks"));
+		} finally {
+			if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prev;
+			rmSync(agent, { recursive: true, force: true });
+			rmSync(proj, { recursive: true, force: true });
+		}
+	});
+	test("invalid JSON or non-object warns and falls back", () => {
+		const agent = mkdtempSync(join(tmpdir(), "rt-cfg-bad-"));
+		const prev = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = agent;
+		try {
+			write(join(agent, "realtasks", "config.json"), "{ nope");
+			let r = loadConfig(agent, false);
+			expect(r.warnings[0]).toContain("not valid JSON");
+			expect(r.config.yieldMs).toBe(DEFAULTS.yieldMs);
+			write(join(agent, "realtasks", "config.json"), "[1]");
+			r = loadConfig(agent, false);
+			expect(r.warnings[0]).toContain("must contain a JSON object");
+		} finally {
+			if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prev;
+			rmSync(agent, { recursive: true, force: true });
+		}
+	});
+	test("mergeConfig merges shortcuts per key", () => {
+		expect(mergeConfig({ a: 1, shortcuts: { x: 1 } }, { shortcuts: { y: 2 } })).toEqual({ a: 1, shortcuts: { x: 1, y: 2 } });
 	});
 });
 

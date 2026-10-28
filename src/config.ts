@@ -1,5 +1,7 @@
-// Settings under `tasks` in ~/.pi/agent/settings.json, overridable per project.
+// Config from <agentDir>/realtasks/config.json, overridable per trusted project
+// in .pi/realtasks/config.json.
 
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -65,4 +67,52 @@ export function resolveConfig(raw: unknown): TasksConfig {
 		},
 		dir: typeof r.dir === "string" && r.dir ? r.dir : join(agentDir(), "tasks"),
 	};
+}
+
+export function userConfigPath(): string {
+	return join(agentDir(), "realtasks", "config.json");
+}
+
+export function projectConfigPath(cwd: string): string {
+	return join(cwd, ".pi", "realtasks", "config.json");
+}
+
+/** Read one config file. Missing → {}; invalid JSON or non-object → warning and {}. */
+export function readConfigFile(path: string): { raw: Record<string, unknown>; warning?: string } {
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch {
+		return { raw: {} };
+	}
+	try {
+		const parsed: unknown = JSON.parse(text);
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return { raw: parsed as Record<string, unknown> };
+		return { raw: {}, warning: `realtasks: ${path} must contain a JSON object; ignored.` };
+	} catch (e) {
+		return { raw: {}, warning: `realtasks: ${path} is not valid JSON (${(e as Error).message}); ignored.` };
+	}
+}
+
+/** Project keys override user keys; `shortcuts` merges per key. */
+export function mergeConfig(base: Record<string, unknown>, over: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = { ...base, ...over };
+	const a = base.shortcuts;
+	const b = over.shortcuts;
+	if (a && typeof a === "object" && b && typeof b === "object") out.shortcuts = { ...a, ...b };
+	return out;
+}
+
+/** Load user config, then the project override when the project is trusted. */
+export function loadConfig(cwd: string, trusted: boolean): { config: TasksConfig; warnings: string[] } {
+	const warnings: string[] = [];
+	const user = readConfigFile(userConfigPath());
+	if (user.warning) warnings.push(user.warning);
+	let raw = user.raw;
+	if (trusted) {
+		const proj = readConfigFile(projectConfigPath(cwd));
+		if (proj.warning) warnings.push(proj.warning);
+		raw = mergeConfig(raw, proj.raw);
+	}
+	return { config: resolveConfig(raw), warnings };
 }

@@ -1,7 +1,7 @@
 // Per-extension-instance state shared by tools, UI, and lifecycle handlers.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resolveConfig, type TasksConfig } from "./config.ts";
+import { loadConfig, resolveConfig, type TasksConfig } from "./config.ts";
 import { TaskManager } from "./manager.ts";
 import { NOTIFICATION_TYPE, type Mode } from "./notify.ts";
 import type { Task } from "./task.ts";
@@ -43,14 +43,11 @@ export class Runtime {
 		return this.manager.cfg;
 	}
 
-	loadConfig(): void {
-		let raw: unknown;
-		try {
-			raw = (this.pi.getSettings() as Record<string, unknown>).tasks;
-		} catch {
-			raw = undefined;
-		}
-		this.manager.cfg = resolveConfig(raw);
+	/** Read realtasks/config.json (user, then trusted project). Returns warnings to show. */
+	loadConfig(cwd = process.cwd(), trusted = false): string[] {
+		const { config, warnings } = loadConfig(cwd, trusted);
+		this.manager.cfg = config;
+		return warnings;
 	}
 
 	onChange(fn: () => void): () => void {
