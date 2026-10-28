@@ -54,6 +54,8 @@ export interface WaitDetails {
 	label: string;
 	id: string;
 	waitedMs: number;
+	/** Wall-clock start of the wait, so live rows can tick between updates. */
+	startedAt?: number;
 	capMs: number;
 	last?: string;
 	/** Why the wait ended: exit, grep, cap, abort, or none (no wait requested). */
@@ -63,7 +65,9 @@ export interface WaitDetails {
 }
 
 export function waitLine(d: WaitDetails, th: Theme, now = Date.now()): string {
-	const waited = formatDuration(d.waitedMs);
+	// Live rows tick between updates: derive elapsed from the wait's start time.
+	const waitedMs = d.phase === "waiting" && d.startedAt !== undefined ? Math.max(d.waitedMs, now - d.startedAt) : d.waitedMs;
+	const waited = formatDuration(waitedMs);
 	if (d.phase === "waiting") {
 		const tail = d.last ? th.fg("dim", ` │ ${oneLine(d.last, 80)}`) : "";
 		return `${th.fg("accent", spinnerFrame(now))} waiting for ${d.label} ${th.fg("dim", `· ${waited} of ${humanMs(d.capMs)}`)}${tail}`;

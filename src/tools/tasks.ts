@@ -7,6 +7,7 @@ import { fileSize, formatForModel, readRange } from "../output.ts";
 import type { Runtime } from "../runtime.ts";
 import type { Task } from "../task.ts";
 import { cleanOutput, decodeEscapes, encodeKeys, formatDuration, lastLines, lastNonEmptyLine } from "../text.ts";
+import { FRAME_MS } from "../ui.ts";
 import { callLine, humanMs, inputPreview, taskName, waitLine, type WaitDetails } from "./render.ts";
 
 const MAX_WAIT_MS = 600_000;
@@ -95,8 +96,19 @@ export function registerTaskTools(rt: Runtime): void {
 			const grep = typeof args.grep === "string" ? `grep /${args.grep}/` : undefined;
 			return callLine(th, "task_output", taskName(rt, args.id), [cap, grep].filter(Boolean).join(" · ") || undefined);
 		},
-		renderResult(result, opts, th) {
+		renderResult(result, opts, th, context) {
 			const d = result.details as WaitDetails | undefined;
+			// Own redraw timer while waiting: onUpdate only fires about once a second,
+			// so the spinner and clock would stutter at 1 fps without it.
+			const state = context.state as { frameTimer?: ReturnType<typeof setInterval> };
+			const waiting = d?.phase === "waiting" && opts.isPartial;
+			if (waiting && !state.frameTimer) {
+				state.frameTimer = setInterval(() => context.invalidate(), FRAME_MS);
+				state.frameTimer.unref();
+			} else if (!waiting && state.frameTimer) {
+				clearInterval(state.frameTimer);
+				state.frameTimer = undefined;
+			}
 			if (d?.phase === "waiting" || (d?.phase === "done" && !opts.expanded)) return new Text(waitLine(d, th), 0, 0);
 			const body = result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
 			return new Text(th.fg("toolOutput", opts.expanded ? body : lastLines(body, 6)), 0, 0);
@@ -114,7 +126,13 @@ export function registerTaskTools(rt: Runtime): void {
 				reason = await waitFor(t, capMs, re, start, signal, (waitedMs) =>
 					onUpdate?.({
 						content: [{ type: "text", text: "" }],
-						details: { ...base, phase: "waiting", waitedMs, last: lastNonEmptyLine(cleanOutput(t.ring.recent().slice(-2048))) },
+						details: {
+							...base,
+							phase: "waiting",
+							waitedMs,
+							startedAt: waitStart,
+							last: lastNonEmptyLine(cleanOutput(t.ring.recent().slice(-2048))),
+						},
 					}),
 				);
 			} else {
