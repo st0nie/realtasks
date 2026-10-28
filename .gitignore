@@ -1,3 +1,9 @@
 node_modules/
 .pi/
 *.log
+
+# realctx: share project memories (.pi/realctx) through git
+!/.pi/
+/.pi/*
+!/.pi/realctx/
+!/.pi/realctx/**
