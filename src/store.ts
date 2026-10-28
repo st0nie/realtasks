@@ -1,6 +1,6 @@
 // On-disk layout: <dir>/<sessionId>/<taskId>.{json,log,exit,err}.
 
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { TaskRecord } from "./types.ts";
@@ -26,8 +26,26 @@ export function writeRecord(root: string, rec: TaskRecord): void {
 	const p = taskPaths(root, rec.sessionId, rec.id).json;
 	mkdirSync(sessionDir(root, rec.sessionId), { recursive: true });
 	const tmp = `${p}.tmp`;
-	writeFileSync(tmp, JSON.stringify(rec, null, 1), { mode: 0o600 });
-	renameSync(tmp, p);
+	const body = JSON.stringify(rec, null, 1);
+	writeFileSync(tmp, body, { mode: 0o600 });
+	// Windows: the rename fails while another process (a reader, a virus scanner) has the target open.
+	for (let i = 0; ; i++) {
+		try {
+			renameSync(tmp, p);
+			return;
+		} catch (e) {
+			const code = (e as NodeJS.ErrnoException).code;
+			if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw e;
+			if (i >= 4) break;
+			sleepSync(10 * (i + 1));
+		}
+	}
+	writeFileSync(p, body, { mode: 0o600 });
+	rmSync(tmp, { force: true });
+}
+
+function sleepSync(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 export function readRecords(root: string, sessionId: string): TaskRecord[] {

@@ -2,8 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import realtasks from "../index.ts";
-import { handleTable, loadPty } from "../src/proc.ts";
-import { fakeCtx, fakePi, tmpDir, until, writeUserConfig } from "./helpers.ts";
+import { TaskManager } from "../src/manager.ts";
+import { fileSize } from "../src/output.ts";
+import { handleTable, isSameProcess, loadPty } from "../src/proc.ts";
+import { fakeCtx, fakePi, testConfig, tmpDir, until, writeUserConfig } from "./helpers.ts";
 
 type Res = { content: Array<{ text: string }>; details?: Record<string, unknown>; isError?: boolean };
 
@@ -133,6 +135,34 @@ describe("task tools", () => {
 		expect(text(s)).toContain("stopped");
 	});
 
+	test("task_stop also kills background children (whole group / tree)", async () => {
+		const r = await env.call("bash", {
+			command: "(while true; do echo tick; sleep 0.2; done) & wait",
+			run_in_background: true,
+			notify: "silent",
+		});
+		const id = taskId(r);
+		await env.call("task_output", { id, wait_ms: 5000, grep: "tick" });
+		await env.call("task_stop", { id, grace_ms: 500 });
+		const log = join(dir, "s-int", `${id}.log`);
+		await new Promise((res) => setTimeout(res, 1000));
+		const size = fileSize(log);
+		await new Promise((res) => setTimeout(res, 1000));
+		expect(fileSize(log)).toBe(size);
+	});
+
+	test("records the PID start time for re-adoption checks", async () => {
+		const r = await env.call("bash", { command: "sleep 5", run_in_background: true, notify: "silent" });
+		const id = taskId(r);
+		const json = join(dir, "s-int", `${id}.json`);
+		// Windows fills it in asynchronously (PowerShell).
+		await until(() => JSON.parse(readFileSync(json, "utf8")).pidStart !== "", 10_000, 100);
+		const rec = JSON.parse(readFileSync(json, "utf8"));
+		expect(isSameProcess(rec.pid, rec.pidStart)).toBe(true);
+		expect(isSameProcess(rec.pid, `${rec.pidStart}0`)).toBe(false);
+		await env.call("task_stop", { id, grace_ms: 200 });
+	}, 15_000);
+
 	test("ready.pattern returns when the pattern appears (flow 3 core)", async () => {
 		const r = await env.call("bash", {
 			command: "echo booting; sleep 0.3; echo 'Listening on 3000'; sleep 5",
@@ -208,6 +238,46 @@ describe("monitor", () => {
 		const out = await env.call("task_output", { id, wait_ms: 4000 });
 		expect(text(out)).toContain("stopped");
 	});
+});
+
+describe("log rotation", () => {
+	test("keeps the last half and the task keeps appending after the cut", async () => {
+		const d = tmpDir("realtasks-rot-");
+		const m = new TaskManager(
+			testConfig(d.dir, { maxLogBytes: 65536 }),
+			{ send: () => {}, toast: () => {}, mode: () => "print", isBusy: () => false },
+			{ changed: () => {} },
+		);
+		try {
+			m.attach("s-rot");
+			const t = m.start({
+				kind: "shell",
+				requested: "x",
+				executed:
+					'for i in $(seq 1 4000); do echo "line $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; done; sleep 1; echo after-rotate',
+				rewritten: false,
+				cwd: d.dir,
+				notify: "silent",
+				tty: false,
+				stdin: false,
+				keepAlive: false,
+				foreground: false,
+			});
+			// Task timers are unref'd; poll with a ref'd timer so the test loop stays alive.
+			await until(() => !t.running, 15_000, 100);
+			const info = await t.waitExit();
+			expect(info.status).toBe("completed");
+			const body = readFileSync(t.rec.logPath, "utf8");
+			expect(t.rec.signals?.logCap).toBe(true);
+			expect(body.length).toBeLessThan(65536);
+			expect(body).not.toContain("\0");
+			expect(body).toContain("line 4000 ");
+			expect(body.endsWith("after-rotate\n")).toBe(true);
+		} finally {
+			m.detach("quit");
+			d.cleanup();
+		}
+	}, 20_000);
 });
 
 describe("reload re-adoption (flow 5)", () => {

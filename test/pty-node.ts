@@ -20,7 +20,9 @@ const call = async (name: string, params: Record<string, unknown>) =>
 const text = (r: Res) => r.content.map((x) => x.text).join("");
 
 await f.emit("session_start", { type: "session_start", reason: "startup" }, c.ctx);
-const r = await call("bash", { command: "python3 -q", tty: true, run_in_background: true, notify: "silent" });
+// Windows installs rarely provide python3.
+const python = process.platform === "win32" ? "python" : "python3";
+const r = await call("bash", { command: `${python} -q`, tty: true, run_in_background: true, notify: "silent" });
 const id = /task (b[0-9a-z]{7})/i.exec(text(r))?.[1];
 if (!id) throw new Error(`no id: ${text(r)}`);
 await until(() => readFileSync(join(dir, "s-pty", `${id}.log`), "utf8").includes(">>>"), 8000);

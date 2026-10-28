@@ -3,7 +3,7 @@
 import { appendFileSync, ftruncateSync, openSync, closeSync, writeSync } from "node:fs";
 import { connect } from "node:net";
 import type { Handle } from "./proc.ts";
-import { isSameProcess, killGroup, readExitFile } from "./proc.ts";
+import { IS_WINDOWS, isStillRunning, killGroup, readExitFile } from "./proc.ts";
 import { fileSize, OutputRing, readRange } from "./output.ts";
 import { stripAnsi } from "./text.ts";
 import type { ReadySpec, TaskRecord, TaskStatus } from "./types.ts";
@@ -124,8 +124,10 @@ export class Task {
 		if (size > this.maxLogBytes) size = this.rotate(size);
 		if (size < this.tailOffset) this.tailOffset = size;
 		if (size === this.tailOffset) return;
-		const chunk = readRange(path, this.tailOffset, size);
+		let chunk = readRange(path, this.tailOffset, size);
 		this.tailOffset = size;
+		// NUL runs: a native Windows writer kept its old offset across a rotation. Never real output.
+		if (chunk.includes("\0")) chunk = chunk.replace(/\0+/g, "");
 		if (!chunk) return;
 		this.lastOutputAt = Date.now();
 		this.ring.append(chunk);
@@ -160,7 +162,7 @@ export class Task {
 
 	private checkLiveness(): void {
 		if (!this.running) return;
-		if (isSameProcess(this.rec.pid, this.rec.pidStart)) return;
+		if (isStillRunning(this.rec.pid, this.rec.pidStart)) return;
 		const code = readExitFile(this.rec.exitPath);
 		if (code !== undefined) this.finish(this.classify(code, undefined));
 		else this.finish({ status: this.stopRequested ? "stopped" : this.timedOut ? "timed_out" : "lost" });
@@ -228,17 +230,21 @@ export class Task {
 	/** SIGTERM (or `signal`) the group, SIGKILL after `graceMs`. */
 	kill(signal: NodeJS.Signals = "SIGTERM", graceMs = 3000): void {
 		if (!this.running) return;
-		killGroup(this.rec.pgid, signal);
+		// Windows with no grace (quit, session switch): kill the tree synchronously,
+		// since an async taskkill may never start once Pi exits.
+		killGroup(this.rec.pgid, signal, IS_WINDOWS && graceMs <= 0, this.rec.id);
 		if (this.handle.pty) {
 			try {
-				this.handle.pty.kill(signal);
+				// ConPTY takes no signals; kill() closes the pseudo console.
+				if (IS_WINDOWS) this.handle.pty.kill();
+				else this.handle.pty.kill(signal);
 			} catch {
 				/* gone */
 			}
 		}
 		if (this.killTimer) clearTimeout(this.killTimer);
 		this.killTimer = setTimeout(() => {
-			if (this.running) killGroup(this.rec.pgid, "SIGKILL");
+			if (this.running) killGroup(this.rec.pgid, "SIGKILL", false, this.rec.id);
 		}, graceMs);
 		this.killTimer.unref();
 	}
