@@ -9,7 +9,7 @@ import type { Task } from "./task.ts";
 /** A foreground `bash` call that can be promoted early. */
 export interface ForegroundSlot {
 	task: Task;
-	promote(reason: "shortcut" | "steer"): void;
+	promote(reason: "shortcut"): void;
 }
 
 export class Runtime {
@@ -20,6 +20,8 @@ export class Runtime {
 	busy = false;
 	/** Wake continuation was requested once this settle; reset on agent_start. */
 	settleContinued = false;
+	/** The background shortcut, only once it was actually registered (TUI, not off, no clash). */
+	backgroundKey: string | undefined;
 	private listeners = new Set<() => void>();
 
 	constructor(pi: ExtensionAPI) {
@@ -66,7 +68,7 @@ export class Runtime {
 	}
 
 	/** Promote every running foreground `bash`. Returns how many were promoted. */
-	promoteAll(reason: "shortcut" | "steer"): number {
+	promoteAll(reason: "shortcut"): number {
 		const slots = [...this.foreground.values()];
 		for (const s of slots) s.promote(reason);
 		return slots.length;

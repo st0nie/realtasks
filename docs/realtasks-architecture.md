@@ -29,41 +29,40 @@ Each existing plugin nails one half: patty has Claude Code's notifications but n
 | [pi-process](https://github.com/LiboShen/pi-process) | OpenClaw/Codex-ish: auto-bg after `yieldMs` (10s), `process` tool | Polling (`process poll`) | Yes, `write` + optional node-pty | No, in-memory with TTL | No push notifications; agent burns turns polling |
 | [pi-unified-exec](https://pi.dev/packages/pi-unified-exec) | Faithful Codex port: `exec_command` + `write_stdin` | Polling with long empty-poll waits | Yes, control bytes and PTY | No | Replaces `bash` name, so rtk hooks keyed on `bash` stop firing |
 
-What we take: patty's exactly-once notification latch and cooperative steering; pi-process's stdin and PTY; unified-exec's yield window and control-byte escapes; pi-background-tasks' durable completion. What we drop: subagents, `sleep` blocking, polling as the primary path.
+What we take: patty's exactly-once notification latch; pi-process's stdin and PTY; Claude Code's timeout that backgrounds instead of killing; unified-exec's control-byte escapes; pi-background-tasks' durable completion. What we drop: subagents, `sleep` blocking, polling as the primary path.
 
 ## Core model
 
-Every `bash` call spawns the same detached process; it only becomes a task if it is still running when the yield window ends, or is promoted early.
+Every `bash` call spawns the same detached process; it only becomes a task if it is still running when its `timeout` ends, or is promoted early. This is Claude Code's model: `timeout` is the foreground window, not a kill switch.
 
 ```
 bash(command) ── spawn detached, output → <id>.log
    │
    ├─ run_in_background ───────────────────────────────► task (return id; ready? wait first)
    │
-   └─ await exit, up to yield_ms
+   └─ await exit, up to timeout (default 120 s, max 600 s)
         ├─ exits in window ────────────────────────────► normal bash result, no task
-        └─ still running / ctrl+shift+b / user types ──► promoted to task (return id + tail)
+        └─ still running / ctrl+shift+b ───────────────► promoted to task (return id + tail)
 ```
 
 Promotion moves nothing: the process was already detached and writing to its log, so `bash` simply stops awaiting it and returns the task id.
 
 - **Kinds**: `shell` (from `bash`) and `monitor`. IDs are a kind prefix plus 8 base36 chars: `b7f3k9a2`, `m2x81a0k`.
-- **States**: `running` → `completed` (exit 0) · `failed` (non-zero exit or signal) · `timed_out` · `stopped` (by `task_stop` or the user) · `lost` (re-adoption found it dead with no exit code).
+- **States**: `running` → `completed` (exit 0) · `failed` (non-zero exit or signal) · `timed_out` (a monitor's `timeout_ms` ran out) · `stopped` (by `task_stop` or the user) · `lost` (re-adoption found it dead with no exit code).
 - **Record**: id, kind, label, `requested` and `executed` command (plus `rewritten`), cwd, pid, pgid, PID start time, started and ended at, status, exit code or signal, log path (and `.err`/`.exit` paths), `notify`, `notified`, `tty`, `stdin`, `keep_alive`, toolCallId, sessionId, `foreground`, `timeout`, `ready`, monitor spec, the agent's `task_output` cursor, and the one-shot signal flags. Written to `<taskId>.json` on every state change, so a re-adopted task keeps its cursor and never repeats a one-shot signal.
 
 ## Agent tool surface
 
-Six tools. `bash` keeps the built-in name and its `command`/`timeout` params so other extensions (rtk, permission gates) keep working; everything new is an optional param.
+Six tools. `bash` keeps the built-in name and its `command`/`timeout` params so other extensions (rtk, permission gates) keep working; everything new is an optional param. `timeout` keeps its name and unit (seconds) but takes Claude Code's meaning (background, not kill).
 
 ### bash (override)
 
 | Param | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `command` | string | required | Unchanged from built-in |
-| `timeout` | seconds | none | Hard kill. Distinct from yield: a timed-out task ends with status `timed_out` |
+| `timeout` | seconds | 120 | Foreground window, as in Claude Code: still running at the end → promoted to a background task, never killed. Clamped to 1 s–`maxTimeoutMs` (600 s). Ignored with `run_in_background`. There is no hard-kill parameter; stop a task with `task_stop` |
 | `description` | string | derived | 3–8 word label for UI and notifications (Claude Code's `description`) |
 | `run_in_background` | bool | false | Return a task id immediately |
-| `yield_ms` | ms | 30000 | Foreground attachment window; still running at the end → promoted to a task. Clamped 1000–600000 |
 | `ready` | `{pattern?, port?, url?, timeout_ms?}` | none | Implies `run_in_background`. Blocks until ready, exit, or `timeout_ms` (default 60000); then returns the task id. If it timed out waiting, a later match sends the one-shot `ready` signal |
 | `tty` | bool | false | Allocate a PTY (needs optional node-pty) |
 | `stdin` | bool | false | Keep a stdin pipe open so `task_input` can write to it (implied by `tty`) |
@@ -136,9 +135,8 @@ Completed tasks get a status line plus a short tail; failed and timed-out tasks 
 
 - `agent_before_settle` and `turn_end` handlers compose: realtasks only ever sets `continue: true` (once per queued wake notification) and passes through the `entries` and `continue` it received, so it never cancels another plugin's continuation.
 - Notifications use `customType: "task-notification"` and never `sendUserMessage`, so goal plugins that parse user prompts (for example continuation markers) never see them as user input.
-- The `input` handler for cooperative steering ignores `source: "extension"` input and only acts while a foreground `bash` is running. Goal continuations arrive as extension messages and pass through untouched.
+- realtasks registers no `input` handler: typed messages (and goal continuations) always take Pi's normal queue untouched.
 - Tool names stay distinct (`bash`, `task_*`, `monitor`); realtasks registers no `goal` or `*_goal` tools and no `/goal` command.
-- An aborted turn caused by cooperative steering resubmits the user's text with `sendUserMessage(..., { deliverAs: "followUp" })`, the same path a typed message takes, so goal accounting sees a normal user turn.
 
 **Other one-shot signals** (each at most once per task, all `passive`):
 
@@ -175,8 +173,8 @@ Every task runs detached in its own process group with output going straight to 
 **Stopping**
 
 - `SIGTERM` to the process group (`process.kill(-pgid)`), then `SIGKILL` after `grace_ms`. Windows: forced `taskkill` of every process carrying the task's `PI_TASK_ID`, at once (see Windows).
-- Esc during a foreground `bash` kills it (user cancel). Ctrl+Shift+B, a typed message, or the yield window ending promote it instead. Same split as Claude Code.
-- `timeout` kills and ends the task as `timed_out`, never as `failed`.
+- Esc during a foreground `bash` kills it (user cancel). Ctrl+Shift+B or the `timeout` window ending promote it instead. A message typed meanwhile is queued by Pi and leaves the command alone; it reaches the model when the call returns. Same split as Claude Code.
+- `bash` never kills on time. Only a monitor's `timeout_ms` ends a task as `timed_out`.
 
 **Readiness** (`ready` on `bash`)
 
@@ -195,7 +193,7 @@ Every task runs detached in its own process group with output going straight to 
 
 **Reload handoff**: `/reload` keeps the same Node process, so live handles (stdin pipe, PTY, `ChildProcess`) are parked in a `globalThis[Symbol.for("realtasks.handles")]` table on `session_shutdown` with reason `reload` and picked up by the new runtime. Only raw handles cross the boundary, never objects built by the old module code, so new code always rebuilds its own task state from the `<taskId>.json` records.
 
-**Re-adoption** on `session_start`: read `<taskId>.json` records for this session; for each `running` one, confirm the PID is alive and its start time matches the record (guards against PID reuse; Linux reads `/proc/<pid>/stat`, macOS `ps -o lstart=`, Windows asks PowerShell), then resume tailing the log and polling liveness every 1 s. Dead with an exit file → finalized and notified (`passive`, since the agent may be on another topic). Dead without one → `lost`. The registry is also mirrored with `pi.appendEntry("realtasks", …)` so the transcript shows when tasks started and ended across reloads: `{event: "started", id, kind, label, command}` when a task is created or a foreground command is promoted, `{event: "ended", id, status, exitCode?, signal?}` when a task ends, and `{event: "readopted", reason, running, finished}` after re-adoption. Foreground commands that finish inside the yield window are not tasks and get no entries. These entries are not sent to the model.
+**Re-adoption** on `session_start`: read `<taskId>.json` records for this session; for each `running` one, confirm the PID is alive and its start time matches the record (guards against PID reuse; Linux reads `/proc/<pid>/stat`, macOS `ps -o lstart=`, Windows asks PowerShell), then resume tailing the log and polling liveness every 1 s. Dead with an exit file → finalized and notified (`passive`, since the agent may be on another topic). Dead without one → `lost`. The registry is also mirrored with `pi.appendEntry("realtasks", …)` so the transcript shows when tasks started and ended across reloads: `{event: "started", id, kind, label, command}` when a task is created or a foreground command is promoted, `{event: "ended", id, status, exitCode?, signal?}` when a task ends, and `{event: "readopted", reason, running, finished}` after re-adoption. Foreground commands that finish inside their `timeout` window are not tasks and get no entries. These entries are not sent to the model.
 
 **Windows.** Supported with the bash Pi's own `bash` tool resolves on Windows (`getShellConfig()`: Git for Windows, then `bash.exe` on PATH such as MSYS2 or Cygwin). Commands are bash commands, exactly like Pi's built-in tool there, so MSYS path conversion applies (`cmd //c`, not `cmd /c`).
 
@@ -252,7 +250,7 @@ Step 2 needs a spike to confirm the assistant message is on the branch before to
 
 The user sees what is running at a glance and can take over any task without asking the agent.
 
-- **Foreground `bash` rendering**: live tail via `onUpdate` (last 8 lines), elapsed time, and a dim hint after 2 s: `ctrl+shift+b to background`. Shows `requested → executed` when the rtk hook rewrote the command.
+- **Foreground `bash` rendering**: live tail via `onUpdate` (last 8 lines) and Pi's own `Elapsed` timer. After 2 s a dim hint line appears inside that `bash` row only while it is running: `ctrl+shift+b to background · auto in 1m48s` (the countdown to the `timeout` window end). The key is shown only if the background shortcut was actually registered (not `off`, no clash, TUI); otherwise the line is just `backgrounds in 1m48s`. The hint is part of the partial tool result, so it disappears with the final result; realtasks sets no editor widget for it. Shows `requested → executed` when the rtk hook rewrote the command.
 - **Task tool rendering** (`renderCall`/`renderResult` on `task_output`, `task_input`, `task_stop`, `monitor`): calls name the task by label, never by bare id, and show durations in human units, never raw milliseconds. Examples: `task_output npm test (b7f3k9a2) · wait up to 10m`, `task_input python REPL (bdw9czz1) · "print(2+2)⏎"`, `task_stop dev server (bgkrw0t2)`, `task_stop all running tasks`. An unknown id falls back to the id alone. While `task_output` waits, its row shows a live line (the renderer redraws it every 120 ms with its own timer, the same frame rate as the dock, and computes the elapsed time from the wait's start timestamp; output updates arrive through `onUpdate` at most once a second), `✱ waiting for npm test · 1m12s of 10m │ test 31 ok`, with the spinner, the elapsed wait, the cap, and the task's latest output line (sent through `onUpdate`, so it is visible but costs no model tokens). When it returns, the row shows why: `✓ npm test completed exit 0 · waited 1m14s`, `grep matched · waited 3s`, or `still running · waited 10m (cap)`. The model-facing parameter stays `wait_ms` for API stability; only the display changes.
 - **Dock** (`ctx.ui.setWidget`, above the editor), drawn as a tree in the style of rpiv-todo and Claude Code's background tasks:
 
@@ -265,7 +263,7 @@ The user sees what is running at a glance and can take over any task without ask
 
   The heading is `●` in the accent color while anything runs, `○` dim otherwise. Each row has a status glyph, the id (dim), the label, the elapsed or total time, and for running tasks the latest output line after a dim `│`. Running shell and PTY tasks show an animated star spinner in the style of Claude Code (`·✢✱✶✻✽` played forward then back, one frame per 120 ms). Every frame is a text-only glyph: Claude Code's `✳` (U+2733) is an emoji character, and terminals that fall back to a color emoji font (Windows Terminal, some Linux setups) draw it as a double-width color emoji that also overwrites the next cell; `✱` (U+2731) takes its place. It is deliberately not Pi's braille spinner, so task activity looks different from Pi's own "Working" indicator. Running monitors pulse between `◉` and `◎`. Finished tasks stay for 10 s after they end with `✓` (completed), `✗` (failed, timed out), `■` (stopped) or `?` (lost), then drop out. At most 5 task rows; the rest collapse into `└─ +N more · /tasks`. The last row uses `└─`, and one blank line follows the panel so it does not touch the editor. The dock is hidden when nothing is running or lingering, and the animation timer runs only while the dock is shown. The status line carries the spinner frame and the running count (`✱ 2`) plus `✓ 2 ✗ 1` counts for unread finished tasks; every glyph is followed by one space before its count, so wide-rendering frames (`✶✻✽`) never touch the digit.
 - **`/tasks` manager** (`ctx.ui.custom` overlay): list on the left, live log on the right. Keys: `↑↓` select, `enter` toggle follow, `pgup`/`pgdn` scroll, `k` stop, `i` send input (prompts for text, C escapes decoded), `r` restart with the same command, `c` copy log path, `x` clear finished, `esc` close. Restart stops the task if it is running, then starts a new user task (as `/bg <cmd>`) with the same executed command, cwd, `tty` and `stdin`; the new task gets a new id. Opening the manager marks finished tasks as seen by the user (clears the `✓`/`✗` status counts) without touching the agent's `notified` latch.
-- **Cooperative steering**: typing a message while a foreground `bash` runs promotes it to a task, aborts the turn and delivers the message as a fresh user turn (patty's behavior, Claude Code parity). Opt-out via `steerPromotes: false`.
+- **Typing during a foreground command**: no special handling. Pi queues the message and delivers it once the `bash` call returns (finished or promoted), the same as Claude Code. Use the background shortcut to free the turn sooner.
 
 | Shortcut / command | Action |
 | --- | --- |
@@ -288,14 +286,14 @@ All keys live in `<agentDir>/realtasks/config.json` (default `~/.pi/agent/realta
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `yieldMs` | 30000 | Default foreground window before promotion |
+| `defaultTimeoutMs` | 120000 | Foreground window when `bash` gets no `timeout` (Claude Code's `BASH_DEFAULT_TIMEOUT_MS`) |
+| `maxTimeoutMs` | 600000 | Upper clamp for `timeout` and `defaultTimeoutMs` (Claude Code's `BASH_MAX_TIMEOUT_MS`) |
 | `maxRunning` | 16 | Concurrent running tasks |
 | `maxLogBytes` | 52428800 | Per-task log cap before rotation (50 MB) |
 | `logRetentionDays` | 7 | Sweep age for old logs |
 | `stallSeconds` | 45 | Silence before the prompt-looking stall check |
 | `defaultNotify` | `wake` | Policy when `bash` omits `notify` |
 | `printModeMaxWaitMs` | 600000 | How long print/JSON mode waits for `wake` tasks |
-| `steerPromotes` | true | Typing during a foreground command promotes it |
 | `rtkPassthroughFor` | `["ready", "tty"]` | Task features that run the original command instead of the rtk rewrite |
 | `shortcuts.background` | `ctrl+shift+b` | Promote shortcut; `off` disables |
 | `shortcuts.manager` | `shift+down` | Manager shortcut; `off` disables |
@@ -305,8 +303,8 @@ All keys live in `<agentDir>/realtasks/config.json` (default `~/.pi/agent/realta
 
 Ship the Claude Code core first; Codex-style interaction and durability follow once the core is stable.
 
-1. **v0.1 Core**: `bash` override with yield and `run_in_background`, `task_output` (with `wait_ms`), `task_stop`, `task_list`, exactly-once notifications, disk logs, dock, `ctrl+shift+b`, rtk contracts 1–5 with original-command recovery.
-2. **v0.2 Interaction**: `task_input`, `tty` via optional `@lydell/node-pty`, `ready`, stall detection, cooperative steering, `/tasks` overlay.
+1. **v0.1 Core**: `bash` override with timeout promotion and `run_in_background`, `task_output` (with `wait_ms`), `task_stop`, `task_list`, exactly-once notifications, disk logs, dock, `ctrl+shift+b`, rtk contracts 1–5 with original-command recovery.
+2. **v0.2 Interaction**: `task_input`, `tty` via optional `@lydell/node-pty`, `ready`, stall detection, `/tasks` overlay.
 3. **v0.3 Durability**: re-adoption across `/reload`, `keep_alive`, print-mode settle handling, log retention.
 4. **v0.4 Streams**: `monitor` (command and file sources), event batching and flood stop.
 
@@ -330,7 +328,7 @@ Each flow is an agent-driven prompt run twice: with `rtk init --agent pi` instal
 
 Resolved from the original open questions:
 
-- Default yield window: 30 s.
+- `bash` `timeout` follows Claude Code: default 120 s, max 600 s, and it backgrounds instead of killing. The separate `yield_ms` param and `yieldMs` config were dropped.
 - Name: `realtasks` (npm package and extension name). It replaces `pi-patty-bg-tasks`; both override `bash`, so only one may be installed.
 - Session switch stops pipe-mode tasks (TUI asks first); `keep_alive` tasks keep running.
 - `monitor` ships (v0.4 scope is in).

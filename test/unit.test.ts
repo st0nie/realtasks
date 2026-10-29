@@ -53,15 +53,19 @@ describe("text", () => {
 describe("config", () => {
 	test("defaults", () => {
 		const c = resolveConfig(undefined);
-		expect(c.yieldMs).toBe(30_000);
+		expect(c.defaultTimeoutMs).toBe(120_000);
+		expect(c.maxTimeoutMs).toBe(600_000);
 		expect(c.maxRunning).toBe(16);
 		expect(c.defaultNotify).toBe("wake");
 		expect(c.shortcuts).toEqual({ background: "ctrl+shift+b", manager: "shift+down" });
 		expect(c.dir).toMatch(/tasks$/);
 	});
 	test("overrides and clamps", () => {
-		const c = resolveConfig({ yieldMs: 5, defaultNotify: "bogus", shortcuts: { background: "off" }, maxRunning: 2 });
-		expect(c.yieldMs).toBe(1000);
+		const c = resolveConfig({ defaultTimeoutMs: 5, defaultNotify: "bogus", shortcuts: { background: "off" }, maxRunning: 2 });
+		expect(c.defaultTimeoutMs).toBe(1000);
+		expect(resolveConfig({ defaultTimeoutMs: 900_000 }).defaultTimeoutMs).toBe(600_000);
+		expect(resolveConfig({ defaultTimeoutMs: 900_000, maxTimeoutMs: 1_200_000 }).defaultTimeoutMs).toBe(900_000);
+		expect(resolveConfig({ steerPromotes: true, yieldMs: 5000 })).toEqual(resolveConfig(undefined));
 		expect(c.defaultNotify).toBe(DEFAULTS.defaultNotify);
 		expect(c.shortcuts.background).toBe("off");
 		expect(c.shortcuts.manager).toBe("shift+down");
@@ -80,14 +84,14 @@ describe("config file", () => {
 		const prev = process.env.PI_CODING_AGENT_DIR;
 		process.env.PI_CODING_AGENT_DIR = agent;
 		try {
-			expect(loadConfig(proj, false).config.yieldMs).toBe(DEFAULTS.yieldMs);
-			write(join(agent, "realtasks", "config.json"), JSON.stringify({ yieldMs: 5000, shortcuts: { manager: "off" } }));
-			write(join(proj, ".pi", "realtasks", "config.json"), JSON.stringify({ yieldMs: 9000, shortcuts: { background: "alt+b" } }));
+			expect(loadConfig(proj, false).config.defaultTimeoutMs).toBe(DEFAULTS.defaultTimeoutMs);
+			write(join(agent, "realtasks", "config.json"), JSON.stringify({ defaultTimeoutMs: 5000, shortcuts: { manager: "off" } }));
+			write(join(proj, ".pi", "realtasks", "config.json"), JSON.stringify({ defaultTimeoutMs: 9000, shortcuts: { background: "alt+b" } }));
 			const untrusted = loadConfig(proj, false).config;
-			expect(untrusted.yieldMs).toBe(5000);
+			expect(untrusted.defaultTimeoutMs).toBe(5000);
 			expect(untrusted.shortcuts).toEqual({ background: "ctrl+shift+b", manager: "off" });
 			const trusted = loadConfig(proj, true).config;
-			expect(trusted.yieldMs).toBe(9000);
+			expect(trusted.defaultTimeoutMs).toBe(9000);
 			expect(trusted.shortcuts).toEqual({ background: "alt+b", manager: "off" });
 			expect(trusted.dir).toBe(join(agent, "tasks"));
 		} finally {
@@ -105,7 +109,7 @@ describe("config file", () => {
 			write(join(agent, "realtasks", "config.json"), "{ nope");
 			let r = loadConfig(agent, false);
 			expect(r.warnings[0]).toContain("not valid JSON");
-			expect(r.config.yieldMs).toBe(DEFAULTS.yieldMs);
+			expect(r.config.defaultTimeoutMs).toBe(DEFAULTS.defaultTimeoutMs);
 			write(join(agent, "realtasks", "config.json"), "[1]");
 			r = loadConfig(agent, false);
 			expect(r.warnings[0]).toContain("must contain a JSON object");

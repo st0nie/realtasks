@@ -139,16 +139,5 @@ export default function realtasks(pi: ExtensionAPI): void {
 		};
 	});
 
-	// Cooperative steering: typing while a foreground bash runs promotes it.
-	pi.on("input", (event, ctx) => {
-		if (event.source === "extension" || !rt.cfg.steerPromotes) return { action: "continue" };
-		if (rt.foreground.size === 0) return { action: "continue" };
-		rt.promoteAll("steer");
-		ctx.abort();
-		pi.sendUserMessage(event.images?.length ? [{ type: "text", text: event.text }, ...event.images] : event.text, {
-			deliverAs: "followUp",
-		});
-		return { action: "handled" };
-	});
 }
 

@@ -8,14 +8,16 @@ import { homedir } from "node:os";
 export type NotifyPolicy = "wake" | "passive" | "silent";
 
 export interface TasksConfig {
-	yieldMs: number;
+	/** Foreground window for `bash` without `timeout` (Claude Code's BASH_DEFAULT_TIMEOUT_MS). */
+	defaultTimeoutMs: number;
+	/** Upper clamp for `timeout` (Claude Code's BASH_MAX_TIMEOUT_MS). */
+	maxTimeoutMs: number;
 	maxRunning: number;
 	maxLogBytes: number;
 	logRetentionDays: number;
 	stallSeconds: number;
 	defaultNotify: NotifyPolicy;
 	printModeMaxWaitMs: number;
-	steerPromotes: boolean;
 	rtkPassthroughFor: string[];
 	shortcuts: { background: string; manager: string };
 	dir: string;
@@ -26,14 +28,14 @@ export function agentDir(): string {
 }
 
 export const DEFAULTS: TasksConfig = {
-	yieldMs: 30_000,
+	defaultTimeoutMs: 120_000,
+	maxTimeoutMs: 600_000,
 	maxRunning: 16,
 	maxLogBytes: 50 * 1024 * 1024,
 	logRetentionDays: 7,
 	stallSeconds: 45,
 	defaultNotify: "wake",
 	printModeMaxWaitMs: 600_000,
-	steerPromotes: true,
 	rtkPassthroughFor: ["ready", "tty"],
 	shortcuts: { background: "ctrl+shift+b", manager: "shift+down" },
 	dir: "",
@@ -48,8 +50,10 @@ export function resolveConfig(raw: unknown): TasksConfig {
 	const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
 	const sc = (r.shortcuts && typeof r.shortcuts === "object" ? r.shortcuts : {}) as Record<string, unknown>;
 	const notify = r.defaultNotify;
+	const maxTimeoutMs = Math.max(1000, num(r.maxTimeoutMs, DEFAULTS.maxTimeoutMs));
 	return {
-		yieldMs: Math.min(600_000, Math.max(1000, num(r.yieldMs, DEFAULTS.yieldMs))),
+		defaultTimeoutMs: Math.min(maxTimeoutMs, Math.max(1000, num(r.defaultTimeoutMs, DEFAULTS.defaultTimeoutMs))),
+		maxTimeoutMs,
 		maxRunning: num(r.maxRunning, DEFAULTS.maxRunning, 1),
 		maxLogBytes: num(r.maxLogBytes, DEFAULTS.maxLogBytes, 64 * 1024),
 		logRetentionDays: num(r.logRetentionDays, DEFAULTS.logRetentionDays),
@@ -57,7 +61,6 @@ export function resolveConfig(raw: unknown): TasksConfig {
 		defaultNotify:
 			notify === "wake" || notify === "passive" || notify === "silent" ? notify : DEFAULTS.defaultNotify,
 		printModeMaxWaitMs: num(r.printModeMaxWaitMs, DEFAULTS.printModeMaxWaitMs),
-		steerPromotes: typeof r.steerPromotes === "boolean" ? r.steerPromotes : DEFAULTS.steerPromotes,
 		rtkPassthroughFor: Array.isArray(r.rtkPassthroughFor)
 			? r.rtkPassthroughFor.filter((x): x is string => typeof x === "string")
 			: DEFAULTS.rtkPassthroughFor,

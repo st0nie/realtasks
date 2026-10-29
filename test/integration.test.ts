@@ -10,7 +10,7 @@ import { fakeCtx, fakePi, testConfig, tmpDir, until, writeUserConfig } from "./h
 type Res = { content: Array<{ text: string }>; details?: Record<string, unknown>; isError?: boolean };
 
 const { dir, cleanup } = tmpDir();
-const agentDir = writeUserConfig({ dir, yieldMs: 1000 });
+const agentDir = writeUserConfig({ dir, defaultTimeoutMs: 1000 });
 let env: ReturnType<typeof setup>;
 
 function setup(sessionId = "s-int") {
@@ -58,8 +58,9 @@ describe("bash override", () => {
 		expect(text(r)).toContain("Command exited with code 3");
 	});
 
-	test("yield promotes; one notification on exit (flow 2 core)", async () => {
-		const r = await env.call("bash", { command: "sleep 1.6; echo finished", yield_ms: 1000 });
+	test("timeout backgrounds instead of killing; one notification on exit (flow 2 core)", async () => {
+		const r = await env.call("bash", { command: "sleep 1.6; echo finished", timeout: 1 });
+		expect(text(r)).toContain("backgrounded after its 1s timeout");
 		expect(text(r)).toContain("Still running as task");
 		const id = taskId(r);
 		// Wait for exit without reading output (that would flip the latch).
@@ -82,11 +83,12 @@ describe("bash override", () => {
 		expect(again).toBeUndefined();
 	});
 
-	test("timeout ends as timed_out", async () => {
-		const r = await env.call("bash", { command: "sleep 5", run_in_background: true, timeout: 1, notify: "silent" });
+	test("timeout is ignored with run_in_background; nothing kills on time", async () => {
+		const r = await env.call("bash", { command: "sleep 1.5; echo ok", run_in_background: true, timeout: 1, notify: "silent" });
 		const id = taskId(r);
 		const out = await env.call("task_output", { id, wait_ms: 5000 });
-		expect(text(out)).toContain("timed_out");
+		expect(text(out)).toContain("completed");
+		expect(text(out)).not.toContain("timed_out");
 	});
 });
 
@@ -351,18 +353,11 @@ describe("reload re-adoption (flow 5)", () => {
 	});
 });
 
-describe("steering", () => {
-	test("typing during a foreground bash promotes it and resubmits", async () => {
-		const p = env.call("bash", { command: "sleep 2; echo done", yield_ms: 60000 });
-		await until(() => (env.handlers.get("input")?.length ?? 0) > 0, 1000);
-		await new Promise((r) => setTimeout(r, 200));
-		const res = await env.emit("input", { type: "input", text: "hey", source: "interactive" }, env.ctx);
-		expect(res).toEqual({ action: "handled" });
-		const r = await p;
-		expect(text(r)).toContain("because the user sent a message");
-		expect(env.aborted()).toBe(1);
-		expect(env.userMessages[0]).toEqual({ content: "hey", opts: { deliverAs: "followUp" } });
-		const ext = await env.emit("input", { type: "input", text: "goal", source: "extension" }, env.ctx);
-		expect(ext).toEqual({ action: "continue" });
+describe("typing during a foreground bash", () => {
+	test("registers no input handler, so Pi queues the message and the command runs on", async () => {
+		const r = await env.call("bash", { command: "sleep 0.3; echo done", timeout: 60 });
+		expect(env.handlers.get("input")?.length ?? 0).toBe(0);
+		expect(text(r)).toContain("done");
+		expect(env.aborted()).toBe(0);
 	});
 });

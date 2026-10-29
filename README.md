@@ -30,12 +30,11 @@ realtasks runs on Linux, macOS and Windows. On Windows, tasks run in the same ba
 
 ## How `bash` behaves
 
-- A command that finishes within `yield_ms` (default 30 s) returns exactly like the built-in `bash`. No task is created.
-- A command still running at the end of the window becomes a task. The agent gets the id and the last 20 lines, then one `<task-notification>` when the task ends.
+- `timeout` works like Claude Code's: it is the foreground window in seconds (default 120, max 600), not a kill switch. A command that finishes within it returns exactly like the built-in `bash`, and no task is created.
+- A command still running when `timeout` ends is not killed. It becomes a task, and the agent gets the id and the last 20 lines, then one `<task-notification>` when the task ends. Stop a task with `task_stop`.
 - `run_in_background: true` returns the id at once.
 - `ready: {port | url | pattern}` waits until a server is ready, then returns. It implies background.
 - `tty: true` or `stdin: true` lets `task_input` write to the process.
-- `timeout` (seconds) kills the task and ends it as `timed_out`.
 - `notify` sets the delivery policy. `wake` (the default) starts a turn, `passive` waits for the next turn, `silent` only shows a toast.
 - `keep_alive: true` keeps the task running after Pi exits. It is re-adopted when the session resumes.
 
@@ -63,12 +62,12 @@ Output goes to `~/.pi/agent/tasks/<session>/<id>.log`. Logs rotate at 50 MB and 
   ```
 
   Finished rows stay for 10 s. The status line shows the running count and unread finished counts (`✱2 ✓1 ✗1`).
-- `ctrl+shift+b` or `/bg` sends running foreground commands to the background. Typing a message while one runs does the same.
+- `ctrl+shift+b` or `/bg` sends running foreground commands to the background. A running `bash` row shows `ctrl+shift+b to background · auto in 1m48s`. A message you type meanwhile is queued, as in Claude Code, and does not touch the command.
 - `shift+down` or `/tasks` opens the manager. Its keys are `k` stop, `i` input, `r` restart, `c` copy log path, `x` clear finished, and `enter` follow.
 - `/bg <cmd>` starts a task yourself. Its completion never wakes the agent.
 - `/tasks stop <id|all>` stops tasks. `/tasks clear` removes finished tasks the agent has already seen; `/tasks clear all` removes every finished task. `/tasks log <id>` shows a task's log path and last 20 lines.
 
-Shortcuts never take a key Pi already binds (`ctrl+b`, for example, is cursor-left). A conflicting setting is skipped with a warning.
+Shortcuts never take a key Pi already binds (`ctrl+b`, for example, is cursor-left). A conflicting setting is skipped with a warning. `ctrl+shift+b` needs a terminal with the kitty keyboard protocol; elsewhere it arrives as `ctrl+b`, so remap it or use `/bg`.
 
 ## Configuration
 
@@ -76,14 +75,14 @@ Config lives in `~/.pi/agent/realtasks/config.json` (optional; missing means def
 
 ```json
 {
-  "yieldMs": 30000,
+  "defaultTimeoutMs": 120000,
+  "maxTimeoutMs": 600000,
   "maxRunning": 16,
   "maxLogBytes": 52428800,
   "logRetentionDays": 7,
   "stallSeconds": 45,
   "defaultNotify": "wake",
   "printModeMaxWaitMs": 600000,
-  "steerPromotes": true,
   "rtkPassthroughFor": ["ready", "tty"],
   "shortcuts": { "background": "ctrl+shift+b", "manager": "shift+down" }
 }

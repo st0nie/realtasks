@@ -4,7 +4,7 @@ import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import type { AgentToolResult, BashToolDetails, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, BashToolDetails } from "@earendil-works/pi-coding-agent";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { NotifyPolicy } from "../config.ts";
 import { formatForModel, readRange } from "../output.ts";
@@ -13,26 +13,25 @@ import type { Runtime } from "../runtime.ts";
 import type { Task } from "../task.ts";
 import { cleanOutput, formatDuration, lastLines } from "../text.ts";
 import type { ReadySpec } from "../types.ts";
+import { Container, Text } from "@earendil-works/pi-tui";
+import { humanMs } from "./render.ts";
 
-export const HINT_WIDGET = "realtasks-hint";
 const HINT_AFTER_MS = 2000;
 const UPDATE_MS = 250;
 
 export const bashParams = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
 	timeout: Type.Optional(
-		Type.Number({ description: "Hard kill after this many seconds; the task ends as timed_out" }),
+		Type.Number({
+			description:
+				"Seconds to wait in the foreground (default 120, max 600). Still running then → it keeps running as a background task (never killed) and you are notified when it ends",
+		}),
 	),
 	description: Type.Optional(
 		Type.String({ description: "3–8 word label for the UI and notifications, e.g. 'run unit tests'" }),
 	),
 	run_in_background: Type.Optional(
 		Type.Boolean({ description: "Start as a background task and return its id immediately" }),
-	),
-	yield_ms: Type.Optional(
-		Type.Number({
-			description: "Foreground window in ms (default 30000, 1000–600000); still running after it → becomes a task",
-		}),
 	),
 	ready: Type.Optional(
 		Type.Object(
@@ -65,7 +64,6 @@ export interface BashParams {
 	timeout?: number;
 	description?: string;
 	run_in_background?: boolean;
-	yield_ms?: number;
 	ready?: ReadySpec;
 	tty?: boolean;
 	stdin?: boolean;
@@ -80,6 +78,8 @@ export interface BashDetails extends BashToolDetails {
 	requested?: string;
 	executed?: string;
 	status?: string;
+	/** Dim hint for the running row (partial results only; never sent to the model). */
+	hint?: string;
 }
 
 type Result = AgentToolResult<BashDetails | undefined> & {
@@ -95,6 +95,22 @@ export function cmdLine(requested: string, executed: string): string {
 	return requested === executed ? executed : `${requested} → ${executed}`;
 }
 
+/** Foreground window in ms: `timeout` seconds or the default, clamped to 1 s–maxTimeoutMs. */
+export function foregroundWindowMs(timeout: number | undefined, defaultMs: number, maxMs: number): number {
+	const ms = typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0 ? timeout * 1000 : defaultMs;
+	return Math.min(maxMs, Math.max(1000, ms));
+}
+
+/**
+ * Hint line for a running foreground row: `ctrl+shift+b to background · auto in 1m48s`.
+ * `key` is the registered background shortcut, if any. Undefined before HINT_AFTER_MS.
+ */
+export function backgroundHint(key: string | undefined, elapsedMs: number, windowMs: number): string | undefined {
+	if (elapsedMs < HINT_AFTER_MS) return undefined;
+	const left = humanMs(Math.max(1, Math.ceil((windowMs - elapsedMs) / 1000)) * 1000);
+	return key ? `${key} to background · auto in ${left}` : `backgrounds in ${left}`;
+}
+
 export function registerBash(rt: Runtime): void {
 	const builtin = createBashToolDefinition(process.cwd());
 	rt.pi.registerTool({
@@ -102,11 +118,11 @@ export function registerBash(rt: Runtime): void {
 		label: "bash",
 		description:
 			"Execute a bash command in the current working directory. Returns stdout and stderr (truncated to the last 2000 lines or 50KB). " +
-			"Commands still running after yield_ms (default 30s) become background tasks: you get a task id and are notified once when it ends. " +
+			"Commands still running after timeout (seconds, default 120, max 600) are not killed: they become background tasks, you get a task id and are notified once when they end. " +
 			"Use run_in_background for long jobs, ready for servers, tty/stdin for interactive programs.",
 		promptSnippet: "Run shell commands; long ones become background tasks with a completion notification",
 		promptGuidelines: [
-			"Long or unbounded commands (test suites, builds, servers): use bash with run_in_background=true, or let them yield. You will get one <task-notification> when the task ends; do not poll or sleep while waiting.",
+			"Long or unbounded commands (test suites, builds, servers): use bash with run_in_background=true, or let them pass their timeout and move to the background. You will get one <task-notification> when the task ends; do not poll or sleep while waiting.",
 			"Dev servers: bash with run_in_background=true and ready={port|url|pattern}; it returns once the server is ready.",
 			"Read task output with task_output (use wait_ms to wait for exit or a grep match instead of sleep loops). Drive interactive tasks (tty/stdin) with task_input; stop with task_stop; list with task_list.",
 			"For per-line event streams (tail -f, log watching) use the monitor tool, not bash.",
@@ -114,7 +130,13 @@ export function registerBash(rt: Runtime): void {
 		parameters: bashParams,
 		outputSchema: builtin.outputSchema,
 		renderCall: builtin.renderCall,
-		renderResult: builtin.renderResult,
+		renderResult(result, options, theme, context) {
+			const c = builtin.renderResult!(result as AgentToolResult<BashToolDetails | undefined>, options, theme, context);
+			const hint = (result.details as BashDetails | undefined)?.hint;
+			// Pi's renderer clears and rebuilds the container each call, so the hint never stacks.
+			if (options.isPartial && hint && c instanceof Container) c.addChild(new Text(`\n${theme.fg("dim", hint)}`, 0, 0));
+			return c;
+		},
 		async execute(toolCallId, rawParams, signal, onUpdate, ctx): Promise<Result> {
 			const p = rawParams as BashParams;
 			rt.ctx = ctx;
@@ -134,7 +156,7 @@ export function registerBash(rt: Runtime): void {
 
 			const background = Boolean(p.run_in_background) || p.ready !== undefined;
 			if (background) rt.manager.assertCapacity();
-			const yieldMs = Math.min(600_000, Math.max(1000, p.yield_ms ?? rt.cfg.yieldMs));
+			const windowMs = foregroundWindowMs(p.timeout, rt.cfg.defaultTimeoutMs, rt.cfg.maxTimeoutMs);
 			const task = rt.manager.start({
 				kind: "shell",
 				requested: rec.requested,
@@ -146,7 +168,6 @@ export function registerBash(rt: Runtime): void {
 				tty: Boolean(p.tty),
 				stdin: Boolean(p.stdin),
 				keepAlive: Boolean(p.keep_alive),
-				timeoutMs: p.timeout && p.timeout > 0 ? p.timeout * 1000 : undefined,
 				ready: p.ready,
 				toolCallId,
 				foreground: !background,
@@ -162,7 +183,7 @@ export function registerBash(rt: Runtime): void {
 				}
 				return waitForReady(rt, task, p.ready, signal, details, notes);
 			}
-			return runForeground(rt, task, yieldMs, signal, onUpdate, ctx, details, notes);
+			return runForeground(rt, task, windowMs, signal, onUpdate, details, notes);
 		},
 	});
 }
@@ -255,18 +276,17 @@ function armLateReady(rt: Runtime, task: Task, ready: ReadySpec): void {
 async function runForeground(
 	rt: Runtime,
 	task: Task,
-	yieldMs: number,
+	windowMs: number,
 	signal: AbortSignal | undefined,
 	onUpdate: ((r: AgentToolResult<BashDetails | undefined>) => void) | undefined,
-	ctx: ExtensionToolContext,
 	details: BashDetails,
 	notes: string[],
 ): Promise<Result> {
 	const started = Date.now();
-	let promoted: "yield" | "shortcut" | "steer" | undefined;
+	let promoted: "timeout" | "shortcut" | undefined;
 	let resolvePromote: (() => void) | undefined;
 	const promoteP = new Promise<void>((r) => (resolvePromote = r));
-	const promote = (why: "yield" | "shortcut" | "steer") => {
+	const promote = (why: "timeout" | "shortcut") => {
 		if (promoted || !task.running) return;
 		promoted = why;
 		resolvePromote?.();
@@ -274,49 +294,36 @@ async function runForeground(
 	const toolCallId = task.rec.toolCallId ?? task.rec.id;
 	rt.foreground.set(toolCallId, { task, promote });
 
-	// Esc cancels (kills) unless the abort came from a promotion (steering).
+	// Esc cancels (kills) unless the command was already promoted.
 	const onAbort = () => {
 		if (!promoted) task.stop("SIGTERM", 2000);
 	};
 	if (signal?.aborted) onAbort();
 	else signal?.addEventListener("abort", onAbort, { once: true });
 
-	const yieldTimer = setTimeout(() => promote("yield"), yieldMs);
-	let hintShown = false;
-	const hintTimer = setTimeout(() => {
-		if (ctx.mode !== "tui" || rt.cfg.shortcuts.background === "off") return;
-		hintShown = true;
-		ctx.ui.setWidget(HINT_WIDGET, [ctx.ui.theme.fg("dim", `(${rt.cfg.shortcuts.background} to background)`)], {
-			placement: "belowEditor",
-		});
-	}, HINT_AFTER_MS);
+	const windowTimer = setTimeout(() => promote("timeout"), windowMs);
 	const updater = onUpdate
 		? setInterval(() => {
+				const elapsed = Date.now() - started;
 				const tail = lastLines(cleanOutput(task.ring.recent()), 8);
-				const head = `${cmdLine(task.rec.requested, task.rec.executed)} · ${formatDuration(Date.now() - started)}`;
-				onUpdate({ content: [text(tail)], details: { ...details, status: head } });
+				const head = `${cmdLine(task.rec.requested, task.rec.executed)} · ${formatDuration(elapsed)}`;
+				const hint = backgroundHint(rt.backgroundKey, elapsed, windowMs);
+				onUpdate({ content: [text(tail)], details: { ...details, status: head, hint } });
 			}, UPDATE_MS)
 		: undefined;
 
 	try {
 		await Promise.race([task.waitExit(), promoteP]);
 	} finally {
-		clearTimeout(yieldTimer);
-		clearTimeout(hintTimer);
+		clearTimeout(windowTimer);
 		if (updater) clearInterval(updater);
 		signal?.removeEventListener("abort", onAbort);
 		rt.foreground.delete(toolCallId);
-		if (hintShown && rt.foreground.size === 0) ctx.ui.setWidget(HINT_WIDGET, undefined);
 	}
 
 	if (task.running && promoted) {
 		rt.manager.promote(task);
-		const why =
-			promoted === "yield"
-				? `after ${Math.round(yieldMs / 1000)}s`
-				: promoted === "shortcut"
-					? "by the user"
-					: "because the user sent a message";
+		const why = promoted === "timeout" ? `after its ${humanMs(windowMs)} timeout` : "by the user";
 		const tail = formatForModel(task.ring.recent(), task.rec.logPath, 20).text;
 		return {
 			content: [
@@ -363,7 +370,6 @@ function finishedResult(
 	const body = out || "(no output)";
 	const append = (s: string) => withNotes(`${out ? `${out}\n\n` : ""}${s}`, notes);
 	if (aborted) throw new Error(append("Command aborted"));
-	if (info.status === "timed_out") throw new Error(append(`Command timed out`));
 	const code = info.exitCode ?? (info.signal ? 128 : 1);
 	const structuredContent = {
 		output: cleaned,

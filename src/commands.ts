@@ -163,7 +163,7 @@ export function registerShortcuts(pi: ExtensionAPI, rt: Runtime, resolved: Resol
 		const clash = findKeyConflict(key, resolved);
 		if (clash) {
 			warnings.push(
-				`realtasks: shortcut ${key} is Pi's ${clash}; not registered. Set tasks.shortcuts.${setting} to another key or "off".`,
+				`realtasks: shortcut ${key} is Pi's ${clash}; not registered. Set shortcuts.${setting} in realtasks/config.json to another key or "off".`,
 			);
 			return;
 		}
@@ -173,6 +173,7 @@ export function registerShortcuts(pi: ExtensionAPI, rt: Runtime, resolved: Resol
 				if (ctx.mode === "tui") run(ctx);
 			},
 		});
+		if (setting === "background") rt.backgroundKey = key;
 	};
 	bind("background", "Background running foreground commands (realtasks)", (ctx) => promoteShortcut(rt, ctx));
 	bind("manager", "Open the task manager (realtasks)", (ctx) => void openManager(rt, ctx));
