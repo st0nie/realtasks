@@ -1,16 +1,16 @@
-// task_output, task_input, task_stop, task_list.
+// task_output, task_wait, task_input, task_stop, task_list.
 
 import { Type } from "typebox";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { fileSize, formatForModel, readRange } from "../output.ts";
+import { fileSize, formatForModel, formatLineRange, type LineRange, parseLineRange, readRange } from "../output.ts";
 import type { Runtime } from "../runtime.ts";
 import type { Task } from "../task.ts";
-import { cleanOutput, decodeEscapes, encodeKeys, formatDuration, lastLines, lastNonEmptyLine } from "../text.ts";
+import { cleanOutput, decodeEscapes, encodeKeys, formatDuration, lastLines, lastNonEmptyLine, userRegex } from "../text.ts";
 import { FRAME_MS } from "../ui.ts";
-import { callLine, humanMs, inputPreview, taskName, waitLine, type WaitDetails } from "./render.ts";
+import { callLine, humanMs, inputPreview, type ReadDetails, statusRow, taskName, waitLine, type WaitDetails } from "./render.ts";
 
-/** task_input collects output for at most this long; task_output waits have no cap. */
+/** task_input collects output for at most this long; task_wait waits have no cap. */
 const MAX_INPUT_WAIT_MS = 600_000;
 
 type R = AgentToolResult<Record<string, unknown> | undefined>;
@@ -19,10 +19,12 @@ function text(t: string): R {
 	return { content: [{ type: "text", text: t }], details: undefined };
 }
 
-export function statusLine(t: Task, now = Date.now()): string {
+function statusLine(t: Task, now = Date.now()): string {
 	const r = t.rec;
 	const dur = formatDuration((r.endedAt ?? now) - r.startedAt);
-	const code = r.exitCode !== undefined ? ` exit=${r.exitCode}` : r.signal ? ` signal=${r.signal}` : "";
+	let code = "";
+	if (r.exitCode !== undefined) code = ` exit=${r.exitCode}`;
+	else if (r.signal) code = ` signal=${r.signal}`;
 	return `${r.id} [${r.kind}] ${r.status}${code} ${dur}`;
 }
 
@@ -39,51 +41,87 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Wait for exit, a grep match in new output, or the deadline. Calls `tick`
- * about once a second (and on new output) so the UI can show progress.
+ * Wait until any task exits, `until` matches one's output after the agent's
+ * cursor, or the deadline. Calls `tick` about once a second (and on new output)
+ * so the UI can show progress. `on` is the task the wait ended on.
  */
 async function waitFor(
-	t: Task,
+	tasks: Task[],
 	ms: number,
-	re: RegExp | undefined,
-	from: number,
+	until: RegExp | undefined,
 	signal: AbortSignal | undefined,
 	tick: (waitedMs: number) => void,
-): Promise<WaitDetails["reason"]> {
+): Promise<{ reason: NonNullable<WaitDetails["reason"]>; on?: Task }> {
 	const started = Date.now();
 	const deadline = started + Math.max(0, ms);
-	let reason: WaitDetails["reason"] = "cap";
-	while (t.running && Date.now() < deadline) {
-		if (signal?.aborted) {
-			reason = "abort";
-			break;
-		}
-		t.poll();
-		if (re && re.test(cleanOutput(readRange(t.rec.logPath, from)))) {
-			reason = "grep";
-			break;
+	while (tasks.every((t) => t.running) && Date.now() < deadline) {
+		if (signal?.aborted) return { reason: "abort" };
+		for (const t of tasks) {
+			t.poll();
+			if (until?.test(cleanOutput(readRange(t.rec.logPath, t.agentCursor)))) return { reason: "match", on: t };
 		}
 		tick(Date.now() - started);
-		await Promise.race([t.waitOutput(), sleep(Math.min(1000, deadline - Date.now()), signal)]);
+		await Promise.race([...tasks.map((t) => t.waitOutput()), sleep(Math.min(1000, deadline - Date.now()), signal)]);
 	}
-	if (!t.running && reason === "cap") reason = "exit";
-	t.poll();
-	return reason;
+	const ended = tasks.find((t) => !t.running);
+	return ended ? { reason: "exit", on: ended } : { reason: "timeout" };
 }
 
 export function registerTaskTools(rt: Runtime): void {
 	const m = rt.manager;
 
+	/**
+	 * One task's status and output in the model-facing format. Reads from
+	 * `from` to the end of the log (or the numbered `range`). Unless `peek`, the
+	 * agent's cursor moves to the end and a terminal task counts as notified.
+	 */
+	function readTask(t: Task, o: { from: number; re?: RegExp; range?: LineRange; peek: boolean; tailLines: number }): string {
+		const r = t.rec;
+		const end = fileSize(r.logPath);
+		let header = "";
+		let body: string;
+		if (o.range) {
+			({ header, text: body } = formatLineRange(readRange(r.logPath, 0, end), o.range, o.re, o.tailLines));
+		} else {
+			const raw = readRange(r.logPath, Math.min(o.from, end), end);
+			if (o.re) {
+				const re = o.re;
+				const lines = cleanOutput(raw).split("\n");
+				const hits = lines.filter((l) => re.test(l));
+				header = `grep: ${hits.length} of ${lines.length} lines match\n`;
+				body = formatForModel(hits.join("\n"), r.logPath, o.tailLines).text;
+			} else {
+				body = formatForModel(raw, r.logPath, o.tailLines).text;
+			}
+		}
+		if (!o.peek) {
+			t.agentCursor = end;
+			m.reveal(t);
+			m.persist(t);
+		}
+		const empty = o.range ? "output: (no lines)" : "output: (no new output)";
+		const cursor = o.peek ? `cursor: ${t.agentCursor} (unchanged by peek; log end ${end})` : `cursor: ${end}`;
+		return [
+			statusLine(t),
+			`label: ${r.label}`,
+			r.rewritten ? `command: ${r.requested} → ${r.executed}` : `command: ${r.executed}`,
+			`${header}${body ? `output:\n${body}` : empty}`,
+			`${cursor} · log: ${r.logPath}`,
+		].join("\n");
+	}
+
+	const tailLimit = (n: number | undefined) => Math.max(1, Math.min(2000, n ?? 200));
+
 	rt.pi.registerTool({
 		name: "task_output",
 		label: "task_output",
 		description:
-			"Read new output and status of a background task. Repeated calls return only output since the last read. " +
-			"wait_ms blocks until the task exits, a grep match appears, or the wait expires (use it instead of sleep loops).",
-		promptSnippet: "Read a background task's new output and status (wait_ms waits for exit or a grep match)",
+			"Read a background task's output and status. Never blocks. Repeated calls return only output since the last read. " +
+			"peek: true only looks: the read cursor stays and the completion notification still arrives. " +
+			"lines reads numbered lines of the whole log (also a peek). To block until a task ends, use task_wait.",
+		promptSnippet: "Read a background task's output and status; never blocks (peek/lines look without side effects)",
 		parameters: Type.Object({
 			id: Type.String({ description: "Task id (or unique prefix)" }),
-			wait_ms: Type.Optional(Type.Number({ description: "Max wait in ms, no upper limit (e.g. 3600000 = 1h); returns early on exit, grep match, or Esc" })),
 			from: Type.Optional(
 				Type.Union([Type.Literal("cursor"), Type.Literal("start"), Type.Number()], {
 					description: "cursor (default: since last read), start, or a byte offset",
@@ -91,11 +129,62 @@ export function registerTaskTools(rt: Runtime): void {
 			),
 			grep: Type.Optional(Type.String({ description: "Regex; only matching lines are returned" })),
 			tail_lines: Type.Optional(Type.Number({ description: "Max lines returned (default 200)" })),
+			peek: Type.Optional(Type.Boolean({ description: "Look without moving the read cursor or using up the completion notification" })),
+			lines: Type.Optional(
+				Type.String({ description: 'Numbered line range of the whole log: "120-260", "120-" (to the end) or "120"; implies peek, ignores from' }),
+			),
 		}),
 		renderCall(args, th) {
-			const cap = typeof args.wait_ms === "number" && args.wait_ms > 0 ? `wait up to ${humanMs(args.wait_ms)}` : undefined;
+			let mode: string | undefined;
+			if (typeof args.lines === "string") mode = `lines ${args.lines}`;
+			else if (args.peek === true) mode = "peek";
 			const grep = typeof args.grep === "string" ? `grep /${args.grep}/` : undefined;
-			return callLine(th, "task_output", taskName(rt, args.id), [cap, grep].filter(Boolean).join(" · ") || undefined);
+			return callLine(th, "task_output", taskName(rt, args.id), [mode, grep].filter(Boolean).join(" · ") || undefined);
+		},
+		renderResult(result, opts, th) {
+			const d = result.details as ReadDetails | undefined;
+			if (d && !opts.expanded) return new Text(statusRow(d, th), 0, 0);
+			const body = result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+			return new Text(th.fg("toolOutput", opts.expanded ? body : lastLines(body, 6)), 0, 0);
+		},
+		async execute(_id, p, _signal, _onUpdate, ctx) {
+			rt.ctx = ctx;
+			const t = m.resolve(p.id);
+			const range = p.lines === undefined ? undefined : parseLineRange(p.lines);
+			t.poll();
+			let from = t.agentCursor;
+			if (p.from === "start") from = 0;
+			else if (typeof p.from === "number") from = Math.max(0, p.from);
+			const peek = p.peek === true || range !== undefined;
+			const out = readTask(t, { from, re: p.grep ? userRegex(p.grep) : undefined, range, peek, tailLines: tailLimit(p.tail_lines) });
+			const r = t.rec;
+			const details: ReadDetails = { label: r.label, id: r.id, status: r.status, exitCode: r.exitCode, cursor: t.agentCursor };
+			return { content: [{ type: "text", text: out }], details };
+		},
+	});
+
+	rt.pi.registerTool({
+		name: "task_wait",
+		label: "task_wait",
+		description:
+			"Block until a background task exits, its output matches `until`, or timeout_ms passes; then return its status and new output (like task_output). " +
+			"With several ids, returns as soon as any of them is done. Last resort: only when nothing else is left to do. " +
+			"The completion notification already tells you when a task ends, and monitor reports matching lines without blocking.",
+		promptSnippet: "Block until a task exits or its output matches; only when nothing else is left to do",
+		parameters: Type.Object({
+			id: Type.Union([Type.String(), Type.Array(Type.String(), { minItems: 1 })], {
+				description: "Task id (or unique prefix), or an array of ids (returns when any is done)",
+			}),
+			timeout_ms: Type.Number({ description: "Max wait in ms, no upper limit (e.g. 3600000 = 1h); returns early on exit, match, or Esc" }),
+			until: Type.Optional(Type.String({ description: "Regex; a match in a task's new output ends the wait" })),
+			tail_lines: Type.Optional(Type.Number({ description: "Max output lines returned per task (default 200)" })),
+		}),
+		renderCall(args, th) {
+			const ids: unknown[] = Array.isArray(args.id) ? args.id : [args.id];
+			const cap = typeof args.timeout_ms === "number" ? `up to ${humanMs(Math.max(0, args.timeout_ms))}` : undefined;
+			const until = typeof args.until === "string" ? `until /${args.until}/` : undefined;
+			const names = ids.map((id) => taskName(rt, id)).join(", ");
+			return callLine(th, "task_wait", names, [cap, until].filter(Boolean).join(" · ") || undefined);
 		},
 		renderResult(result, opts, th, context) {
 			const d = result.details as WaitDetails | undefined;
@@ -110,72 +199,52 @@ export function registerTaskTools(rt: Runtime): void {
 				clearInterval(state.frameTimer);
 				state.frameTimer = undefined;
 			}
-			if (d?.phase === "waiting" || (d?.phase === "done" && !opts.expanded)) return new Text(waitLine(d, th), 0, 0);
+			if (d && (d.phase === "waiting" || !opts.expanded)) return new Text(waitLine(d, th), 0, 0);
 			const body = result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
 			return new Text(th.fg("toolOutput", opts.expanded ? body : lastLines(body, 6)), 0, 0);
 		},
 		async execute(_id, p, signal, onUpdate, ctx) {
 			rt.ctx = ctx;
-			const t = m.resolve(p.id);
-			const re = p.grep ? new RegExp(p.grep) : undefined;
-			const start = p.from === "start" ? 0 : typeof p.from === "number" ? Math.max(0, p.from) : t.agentCursor;
-			const capMs = Math.max(0, p.wait_ms ?? 0);
+			const tasks = [...new Set((Array.isArray(p.id) ? p.id : [p.id]).map((id) => m.resolve(id)))];
+			if (tasks.length === 0) throw new Error("task_wait needs at least one task id");
+			const capMs = Math.max(0, p.timeout_ms);
 			const waitStart = Date.now();
-			const base = { label: t.rec.label, id: t.rec.id, capMs };
-			let reason: WaitDetails["reason"] = "none";
-			if (capMs > 0 && t.running) {
-				reason = await waitFor(t, capMs, re, start, signal, (waitedMs) =>
-					onUpdate?.({
-						content: [{ type: "text", text: "" }],
-						details: {
-							...base,
-							phase: "waiting",
-							waitedMs,
-							startedAt: waitStart,
-							last: lastNonEmptyLine(cleanOutput(t.ring.recent().slice(-2048))),
-						},
-					}),
-				);
-			} else {
-				t.poll();
-				if (!t.running) reason = "exit";
-			}
-			const end = fileSize(t.rec.logPath);
-			const raw = readRange(t.rec.logPath, Math.min(start, end), end);
-			t.agentCursor = end;
-			m.reveal(t);
-			m.persist(t);
-			const tailLines = Math.max(1, Math.min(2000, p.tail_lines ?? 200));
-			let body: string;
-			let header = "";
-			if (re) {
-				const lines = cleanOutput(raw).split("\n");
-				const hits = lines.filter((l) => re.test(l));
-				header = `grep: ${hits.length} of ${lines.length} new lines match\n`;
-				body = formatForModel(hits.join("\n"), t.rec.logPath, tailLines).text;
-			} else {
-				body = formatForModel(raw, t.rec.logPath, tailLines).text;
-			}
-			const r = t.rec;
-			const out = [
-				statusLine(t),
-				`label: ${r.label}`,
-				r.rewritten ? `command: ${r.requested} → ${r.executed}` : `command: ${r.executed}`,
-				`${header}${body ? `output:\n${body}` : "output: (no new output)"}`,
-				`cursor: ${end} · log: ${r.logPath}`,
-			];
-			return {
-				content: [{ type: "text", text: out.join("\n") }],
-				details: {
-					...base,
-					phase: "done",
-					waitedMs: Date.now() - waitStart,
-					reason,
-					status: r.status,
-					exitCode: r.exitCode,
-					cursor: end,
-				},
+			const labels = tasks.map((t) => t.rec.label).join(", ");
+			const ids = tasks.map((t) => t.rec.id).join(", ");
+			const { reason, on } = await waitFor(tasks, capMs, p.until ? userRegex(p.until) : undefined, signal, (waitedMs) => {
+				const live = tasks.find((t) => t.running) ?? tasks[0];
+				onUpdate?.({
+					content: [{ type: "text", text: "" }],
+					details: {
+						phase: "waiting",
+						label: labels,
+						id: ids,
+						capMs,
+						waitedMs,
+						startedAt: waitStart,
+						last: lastNonEmptyLine(cleanOutput(live.ring.recent().slice(-2048))),
+					} satisfies WaitDetails,
+				});
+			});
+			const waitedMs = Date.now() - waitStart;
+			for (const t of tasks) t.poll();
+			let head = `timed out after ${formatDuration(waitedMs)}`;
+			if (on) head = `woke on: ${on.rec.id} (${reason})`;
+			else if (reason === "abort") head = `cancelled after ${formatDuration(waitedMs)}`;
+			const tailLines = tailLimit(p.tail_lines);
+			const blocks = tasks.map((t) => readTask(t, { from: t.agentCursor, peek: false, tailLines }));
+			const main = (on ?? tasks[0]).rec;
+			const details: WaitDetails = {
+				phase: "done",
+				label: on ? main.label : labels,
+				id: main.id,
+				capMs,
+				waitedMs,
+				reason,
+				status: main.status,
+				exitCode: main.exitCode,
 			};
+			return { content: [{ type: "text", text: [head, ...blocks].join("\n\n") }], details };
 		},
 	});
 

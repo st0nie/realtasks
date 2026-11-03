@@ -29,7 +29,7 @@ await until(() => readFileSync(join(dir, "s-pty", `${id}.log`), "utf8").includes
 const out = text(await call("task_input", { id, text: "print(2+2)\\r", wait_ms: 800 }));
 if (!/\b4\b/.test(out)) throw new Error(`expected 4 in: ${out}`);
 await call("task_input", { id, text: "\\x04", wait_ms: 300 });
-const end = text(await call("task_output", { id, wait_ms: 5000 }));
+const end = text(await call("task_wait", { id, timeout_ms: 5000 }));
 if (!end.includes("completed exit=0")) throw new Error(`expected completed: ${end}`);
 const stall = f.sent.some((s) => s.content.includes('signal="stall"'));
 if (stall) throw new Error("unexpected stall warning");

@@ -359,7 +359,7 @@ export class TaskManager {
 		this.events.changed();
 	}
 
-	/** Agent learned the terminal state (task_output, task_stop, bash result). */
+	/** Agent learned the terminal state (task_output without peek, task_wait, task_stop, bash result). */
 	reveal(t: Task): void {
 		if (!t.running) this.markNotified(t.rec.id);
 	}

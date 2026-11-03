@@ -42,12 +42,7 @@ export default function realtasks(pi: ExtensionAPI): void {
 	});
 
 	pi.registerMessageRenderer<NotificationDetails>(NOTIFICATION_TYPE, (message, options, theme) =>
-		renderNotification(
-			message.details,
-			typeof message.content === "string" ? message.content : message.content.map((c) => ("text" in c ? c.text : "")).join(""),
-			options.expanded,
-			theme,
-		),
+		renderNotification(message.details, messageText(message.content), options.expanded, theme),
 	);
 
 	// rtk contract / recovery step 1: stash the command as this handler sees it.
@@ -63,7 +58,7 @@ export default function realtasks(pi: ExtensionAPI): void {
 		const configWarnings = rt.loadConfig(ctx.cwd, ctx.isProjectTrusted());
 		for (const w of configWarnings) {
 			if (ctx.hasUI) ctx.ui.notify(w, "warning");
-			else console.error(w);
+			else process.stderr.write(`${w}\n`);
 		}
 		if (!shortcutsBound && ctx.mode === "tui") {
 			shortcutsBound = true;
@@ -97,7 +92,7 @@ export default function realtasks(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", async (event) => {
 		disposeDock?.();
 		disposeDock = undefined;
-		const reason = event.reason === "reload" ? "reload" : event.reason === "quit" ? "quit" : "switch";
+		const reason = event.reason === "reload" || event.reason === "quit" ? event.reason : "switch";
 		rt.manager.detach(reason);
 		rt.foreground.clear();
 	});
@@ -141,3 +136,8 @@ export default function realtasks(pi: ExtensionAPI): void {
 
 }
 
+/** Plain text of a custom message's content. */
+function messageText(content: string | ReadonlyArray<object>): string {
+	if (typeof content === "string") return content;
+	return content.map((c) => ("text" in c && typeof c.text === "string" ? c.text : "")).join("");
+}

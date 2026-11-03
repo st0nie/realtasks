@@ -4,6 +4,21 @@
 const ANSI_RE =
 	/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[PX^_][^\x1b]*\x1b\\|\x1b[@-Z\\-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
+/**
+ * Compile a regex supplied by the model or the user (grep, until, monitor
+ * filters, ready patterns). Matching their patterns is the feature, so the
+ * non-literal-regexp (ReDoS) audit rule does not apply here.
+ */
+export function userRegex(pattern: string, flags?: string): RegExp {
+	return new RegExp(pattern, flags); // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
+}
+
+/** `exit 1`, the signal name, or undefined while a task has neither. */
+export function exitText(r: { exitCode?: number; signal?: string }): string | undefined {
+	if (r.exitCode !== undefined) return `exit ${r.exitCode}`;
+	return r.signal || undefined;
+}
+
 export function stripAnsi(s: string): string {
 	return s.replace(ANSI_RE, "");
 }

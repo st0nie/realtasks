@@ -131,7 +131,9 @@ type ResolvedBindings = Record<string, KeyId | KeyId[] | undefined>;
 export function findKeyConflict(key: string, resolved: ResolvedBindings): string | undefined {
 	const k = key.toLowerCase();
 	for (const [action, keys] of Object.entries(resolved)) {
-		const list = Array.isArray(keys) ? keys : keys ? [keys] : [];
+		let list: KeyId[] = [];
+		if (Array.isArray(keys)) list = keys;
+		else if (keys) list = [keys];
 		if (list.some((x) => x.toLowerCase() === k)) return action;
 	}
 	return undefined;

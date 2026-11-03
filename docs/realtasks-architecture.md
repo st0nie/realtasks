@@ -6,7 +6,7 @@ Oct 28, 2026 · @ston
 
 realtasks is one Pi extension that merges Claude Code's background model (fire, keep working, get told when it's done) with Codex's unified-exec model (yield after a window, then poll or drive the process via stdin/PTY). It overrides `bash`, adds four small task tools plus `monitor`, and stays fully compatible with rtk's Pi hooks.
 
-**Goals**
+### Goals
 
 - The agent never blocks on a long command and never needs `sleep` or polling loops to learn that something finished.
 - Exactly one completion notification per task, suppressed if the agent already read the result.
@@ -35,7 +35,7 @@ What we take: patty's exactly-once notification latch; pi-process's stdin and PT
 
 Every `bash` call spawns the same detached process; it only becomes a task if it is still running when its `timeout` ends, or is promoted early. This is Claude Code's model: `timeout` is the foreground window, not a kill switch.
 
-```
+```text
 bash(command) ── spawn detached, output → <id>.log
    │
    ├─ run_in_background ───────────────────────────────► task (return id; ready? wait first)
@@ -74,17 +74,33 @@ Result when the command finishes in the window: identical to built-in `bash` (sa
 
 ### task\_output
 
-Read new output and status. Replaces polling loops: `wait_ms` blocks until the task exits, a `grep` match appears, or the wait expires.
+Read a task's output and status. Never blocks: it reads what the log holds now and returns. Waiting lives in `task_wait`, so a read can never stall the turn.
 
 | Param | Default | Notes |
 | --- | --- | --- |
-| `id` | required |  |
-| `wait_ms` | 0 | No upper limit (a long-running agent loop can wait hours for one task instead of re-polling every few minutes); returns early on exit, match, or Esc |
-| `from` | `cursor` | `cursor` (since this tool last read), `start`, or a byte offset |
+| `id` | required | Task id or unique prefix |
+| `from` | `cursor` | `cursor` (since the agent last consumed output), `start`, or a byte offset |
 | `grep` | none | Regex; only matching lines returned, with counts |
-| `tail_lines` | 200 | Cap on lines returned |
+| `tail_lines` | 200 | Cap on lines returned (max 2000) |
+| `peek` | false | Look without consuming: the agent's cursor does not move and the read does not count as learning the outcome, so a pending notification still arrives |
+| `lines` | none | 1-indexed line range of the whole cleaned log: `"120-260"`, `"120-"` (to the end), or `"120"` (one line). Implies `peek`; ignores `from`. Each returned line is prefixed with its line number (`120: …`), `grep` filters within the range, and at most `tail_lines` lines are shown counting from the start of the range, with a footer naming the next range to read |
 
-Returns status, exit code or signal, duration, new output, next cursor, log path. Reading a terminal task marks it notified.
+Returns status, exit code or signal, duration, output, cursor, log path. A plain read advances the cursor to the end of the log and, for a terminal task, marks it notified; a `peek` (or `lines`) read does neither.
+
+### task\_wait
+
+Block until a task exits, its output matches `until`, or `timeout_ms` passes. Replaces polling and sleep loops, but is the last resort: the completion notification already reports when a task ends (with a goal plugin, `update_goal` `waiting` ends the turn until it arrives), and `monitor` reports matching lines without blocking. Use it when the agent has nothing else to do until a task finishes.
+
+| Param | Default | Notes |
+| --- | --- | --- |
+| `id` | required | One id (or unique prefix), or an array of them; duplicates are merged |
+| `timeout_ms` | required | No upper limit (a long-running agent loop can wait hours instead of re-polling every few minutes); `0` returns at once |
+| `until` | none | Regex; a match in a task's output after its cursor ends the wait |
+| `tail_lines` | 200 | Cap on output lines returned per task (max 2000) |
+
+With several ids it returns as soon as any of them exits or matches, and immediately if one has already ended. Esc ends the wait; user steering does not. The result starts with a `woke on: <id> (exit|match)` line when the wait ended on a task, or `timed out after <duration>` / `cancelled`, followed by one block per task in the given order, each in the plain `task_output` format: the read consumes the new output (cursor advances) and a terminal task is marked notified.
+
+The two tool descriptions and the `bash` prompt guideline tell the model the same: `task_output` never blocks, `peek`/`lines` look at a log with no side effects, and `task_wait` is the last resort rather than the default way to follow a task.
 
 ### task\_input
 
@@ -106,11 +122,11 @@ Streaming watch: each stdout line that matches `filter` becomes an event deliver
 
 Every task ends with exactly one `<task-notification>`, unless the agent already learned the outcome. This is the core of the Claude Code feel and the main thing pi-process lacks.
 
-**Exactly-once latch.** Each task has `notified: boolean`. It flips to true when the notification is sent, or when `task_output`, `task_stop` or a promoted `bash` result reveals the terminal state. A pending notification whose task flips first is dropped.
+**Exactly-once latch.** Each task has `notified: boolean`. It flips to true when the notification is sent, or when `task_output` (without `peek` or `lines`), `task_wait`, `task_stop` or a promoted `bash` result reveals the terminal state. A pending notification whose task flips first is dropped. A `peek` never flips it, so looking at a finished task's log still leaves its notification to arrive.
 
 **Message shape** (custom message, `customType: "task-notification"`, rendered compactly in the TUI):
 
-```
+```text
 <task-notification id="b7f3k9a2" status="failed" exit="1" duration="4m12s">
 npm test — 3 failed, 211 passed
 …last 15 lines…
@@ -151,7 +167,7 @@ Full output always goes to disk; the model only ever sees bounded slices.
 - **Location**: `~/.pi/agent/tasks/<sessionId>/<taskId>.log` (respects `PI_CODING_AGENT_DIR`), not `/tmp`, so logs survive reboots and are found again on resume. A sibling `<taskId>.json` holds the task record; `<taskId>.exit` holds the exit code (see Process management).
 - **Capture**: stdout and stderr are both written to the log fd by the child directly (no Node pipe in the hot path for pipe mode). PTY mode reads from the PTY and appends. Stdout and stderr are interleaved in pipe mode; monitors keep stderr in a separate `.err` file so it never counts as an event.
 - **In-memory buffer**: a head + tail ring per task (first 4 KB, last 64 KB) for previews, the dock and notifications without touching disk.
-- **Cursors**: `task_output` keeps a byte offset per task for the agent, so repeated reads return only new output. The UI has its own cursor and never moves the agent's.
+- **Cursors**: `task_output` and `task_wait` keep a byte offset per task for the agent, so repeated reads return only new output. `peek` and `lines` reads leave it where it is. The UI has its own cursor and never moves the agent's.
 - **Model-facing text**: ANSI and control sequences stripped, carriage-return progress bars collapsed to their final state, then truncated with Pi's own `truncateHead`/`truncateTail` helpers (same limits as built-in `bash`) and a footer pointing at the full log.
 - **Caps**: `maxLogBytes` per task (default 50 MB). Past it, the log is rotated to keep the last half and the agent is told once; the task is never killed for being chatty, except monitors that exceed their event rate.
 - **Retention**: terminal tasks stay listed for the session; logs older than `logRetentionDays` (default 7) are swept on `session_start`, in the background.
@@ -160,7 +176,7 @@ Full output always goes to disk; the model only ever sees bounded slices.
 
 Every task runs detached in its own process group with output going straight to a file, so it does not depend on Pi staying alive. That one choice makes promotion, reload and re-adoption cheap.
 
-**Spawn**
+### Spawn
 
 - Same shell the built-in `bash` uses, run through a tiny wrapper: `sh -c '<shell> -c "$PI_TASK_CMD"; printf %s $? > "$PI_TASK_EXIT"'`. The exit file is what lets a re-adopted task report its real exit code. On Windows there is no `/bin/sh`, so the resolved bash runs the wrapper itself (see Windows).
 - `detached: true` (new process group), `windowsHide: true`, stdio = `['ignore' | 'pipe', logFd, logFd]`. The log is opened `O_APPEND` so rotation can truncate it safely. Stdin is a pipe only when `bash` is called with `stdin: true` (default false, so a stray `cat` never hangs on an open pipe); PTY mode (`tty: true`) uses node-pty instead.
@@ -170,7 +186,7 @@ Every task runs detached in its own process group with output going straight to 
 - Completion is the child's `exit` event (not `close`), so a daemonized grandchild holding the log fd cannot keep a task alive.
 - Concurrency cap: `maxRunning` (default 16). Over it, `bash` with `run_in_background` errors with the list of running tasks.
 
-**Stopping**
+### Stopping
 
 - `SIGTERM` to the process group (`process.kill(-pgid)`), then `SIGKILL` after `grace_ms`. Windows: forced `taskkill` of every process carrying the task's `PI_TASK_ID`, at once (see Windows).
 - Esc during a foreground `bash` kills it (user cancel). Ctrl+Shift+B or the `timeout` window ending promote it instead. A message typed meanwhile is queued by Pi and leaves the command alone; it reaches the model when the call returns. Same split as Claude Code.
@@ -183,7 +199,7 @@ Every task runs detached in its own process group with output going straight to 
 - `url`: HTTP GET, any status below 500 counts.
 - Result reports which condition fired and the output so far; an early exit returns as a normal failure.
 
-**Lifetime**
+### Lifetime
 
 | Event | Pipe-mode task | PTY task | `keep_alive` task |
 | --- | --- | --- | --- |
@@ -212,19 +228,19 @@ Target: rtk's own Pi extension, [hooks/pi/rtk.ts](https://raw.githubusercontent.
 **What the hook does** (from its source):
 
 - Listens on `tool_call`; acts only when `event.toolName === "bash"`.
-- Skips empty commands, commands already starting with ` rtk  `, and runs where `RTK_DISABLED=1` is set in Pi's own environment.
+- Skips empty commands, commands that already start with the word `rtk`, and runs where `RTK_DISABLED=1` is set in Pi's own environment.
 - Runs `rtk rewrite <cmd>` via `pi.exec` with a 2 s timeout; exit 0 or 3 with stdout → replaces `event.input.command` in place; anything else passes through (fail-open).
 - Probes `rtk --version` at load; missing or older than 0.23 → disabled, status line says why.
 
-**Contracts realtasks must keep**
+### Contracts realtasks must keep
 
 1. The override is registered under the exact name `bash`, so the hook fires. Never rename it to `exec_command` (pi-unified-exec's choice, which silently disables rtk).
 2. The command is read from `params.command` inside `execute()`, after all `tool_call` handlers ran. Never cache it from an earlier event.
 3. `command` stays a plain string param; extra params (`run_in_background`, `ready`, `tty`, …) live alongside it and are untouched by the hook.
-4. `task_output`, `task_input`, `task_stop`, `task_list` and `monitor` have other tool names, so the hook never rewrites them. `monitor` is the right tool for `tail -f`-style streams for that reason.
+4. `task_output`, `task_wait`, `task_input`, `task_stop`, `task_list` and `monitor` have other tool names, so the hook never rewrites them. `monitor` is the right tool for `tail -f`-style streams for that reason.
 5. Logs, notifications and the dock show the command that actually ran. Pi's transcript renders the original call, so the task record stores both `requested` and `executed` and the UI shows `git status → rtk git status` when they differ.
 
-**Where a rewrite hurts, and the fix**
+### Where a rewrite hurts, and the fix
 
 rtk filters condense output, and some only emit once the wrapped command exits. That is ideal for finite commands, but harmful when realtasks needs live bytes:
 
@@ -251,10 +267,10 @@ Step 2 needs a spike to confirm the assistant message is on the branch before to
 The user sees what is running at a glance and can take over any task without asking the agent.
 
 - **Foreground `bash` rendering**: live tail via `onUpdate` (last 8 lines) and Pi's own `Elapsed` timer. After 2 s a dim hint line appears inside that `bash` row only while it is running: `ctrl+shift+b to background · auto in 1m48s` (the countdown to the `timeout` window end). The key is shown only if the background shortcut was actually registered (not `off`, no clash, TUI); otherwise the line is just `backgrounds in 1m48s`. The hint is part of the partial tool result, so it disappears with the final result; realtasks sets no editor widget for it. Shows `requested → executed` when the rtk hook rewrote the command.
-- **Task tool rendering** (`renderCall`/`renderResult` on `task_output`, `task_input`, `task_stop`, `monitor`): calls name the task by label, never by bare id, and show durations in human units, never raw milliseconds. Examples: `task_output npm test (b7f3k9a2) · wait up to 10m`, `task_input python REPL (bdw9czz1) · "print(2+2)⏎"`, `task_stop dev server (bgkrw0t2)`, `task_stop all running tasks`. An unknown id falls back to the id alone. While `task_output` waits, its row shows a live line (the renderer redraws it every 120 ms with its own timer, the same frame rate as the dock, and computes the elapsed time from the wait's start timestamp; output updates arrive through `onUpdate` at most once a second), `✱ waiting for npm test · 1m12s of 10m │ test 31 ok`, with the spinner, the elapsed wait, the cap, and the task's latest output line (sent through `onUpdate`, so it is visible but costs no model tokens). When it returns, the row shows why: `✓ npm test completed exit 0 · waited 1m14s`, `grep matched · waited 3s`, or `still running · waited 10m (cap)`. The model-facing parameter stays `wait_ms` for API stability; only the display changes.
+- **Task tool rendering** (`renderCall`/`renderResult` on `task_output`, `task_wait`, `task_input`, `task_stop`, `monitor`): calls name the task by label, never by bare id, and show durations in human units, never raw milliseconds. Examples: `task_output npm test (b7f3k9a2) · peek`, `task_output npm test (b7f3k9a2) · lines 120-260 · grep /error/`, `task_wait npm test (b7f3k9a2) · up to 10m · until /ready/`, `task_input python REPL (bdw9czz1) · "print(2+2)⏎"`, `task_stop dev server (bgkrw0t2)`, `task_stop all running tasks`. A `task_wait` on several tasks names each of them, separated by commas. An unknown id falls back to the id alone. A collapsed `task_output` result is one status row (`· npm test running`); expanded, it shows the output. While `task_wait` waits, its row shows a live line (the renderer redraws it every 120 ms with its own timer, the same frame rate as the dock, and computes the elapsed time from the wait's start timestamp; output updates arrive through `onUpdate` at most once a second), `✱ waiting for npm test · 1m12s of 10m │ test 31 ok`, with the spinner, the task labels, the elapsed wait, the cap, and the latest output line of the first task still running (sent through `onUpdate`, so it is visible but costs no model tokens). When it returns, the row shows why, naming the task the wait ended on: `✓ npm test completed exit 0 · waited 1m14s`, `✓ dev server output matched · waited 3s`, `still running · waited 10m (timeout)`, or `wait cancelled · 4s`.
 - **Dock** (`ctx.ui.setWidget`, above the editor), drawn as a tree in the style of rpiv-todo and Claude Code's background tasks:
 
-  ```
+  ```text
   ● Tasks (2 running · 1 done)
   ├─ ✱ bxomyvwe npm test · 42s │ test 31 ok
   ├─ ◉ mshcwo0p app errors · 12s │ ERROR boom 3
@@ -303,7 +319,7 @@ All keys live in `<agentDir>/realtasks/config.json` (default `~/.pi/agent/realta
 
 Ship the Claude Code core first; Codex-style interaction and durability follow once the core is stable.
 
-1. **v0.1 Core**: `bash` override with timeout promotion and `run_in_background`, `task_output` (with `wait_ms`), `task_stop`, `task_list`, exactly-once notifications, disk logs, dock, `ctrl+shift+b`, rtk contracts 1–5 with original-command recovery.
+1. **v0.1 Core**: `bash` override with timeout promotion and `run_in_background`, `task_output`, `task_wait`, `task_stop`, `task_list`, exactly-once notifications, disk logs, dock, `ctrl+shift+b`, rtk contracts 1–5 with original-command recovery.
 2. **v0.2 Interaction**: `task_input`, `tty` via optional `@lydell/node-pty`, `ready`, stall detection, `/tasks` overlay.
 3. **v0.3 Durability**: re-adoption across `/reload`, `keep_alive`, print-mode settle handling, log retention.
 4. **v0.4 Streams**: `monitor` (command and file sources), event batching and flood stop.
@@ -323,6 +339,8 @@ Each flow is an agent-driven prompt run twice: with `rtk init --agent pi` instal
 | 5 | "Run `sleep 20 && false` in the background, then `/reload`" | Task is re-adopted after reload and finishes as `failed`, exit 1, notified once |
 | 6 | Agent reads a finished task with `task_output` before the notification flushes | No notification is sent for that task |
 | 7 | Monitor `grep --line-buffered ERROR` on a log that gets 3 errors | Three events, batched, monitor not rewritten by rtk |
+| 8 | Agent peeks at a finished task's log (`peek` or `lines`) before the notification flushes | The notification still arrives; a later plain `task_output` still returns that output as new |
+| 9 | Two background tasks, agent waits on both with one `task_wait` | Returns when the first one ends, with a block per task; no wait per task |
 
 ## Decisions
 

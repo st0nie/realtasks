@@ -2,7 +2,7 @@
 
 import type { NotifyPolicy } from "./config.ts";
 import type { TaskRecord } from "./types.ts";
-import { cleanOutput, formatDuration, lastLines } from "./text.ts";
+import { cleanOutput, exitText, formatDuration, lastLines } from "./text.ts";
 
 export const NOTIFICATION_TYPE = "task-notification";
 export const EVENT_TYPE = "task-event";
@@ -63,8 +63,8 @@ export function terminalBlock(rec: TaskRecord, rawTail: string, now = Date.now()
 
 export function terminalSummary(rec: TaskRecord, now = Date.now()): string {
 	const dur = formatDuration((rec.endedAt ?? now) - rec.startedAt);
-	const code = rec.exitCode !== undefined ? ` exit ${rec.exitCode}` : rec.signal ? ` ${rec.signal}` : "";
-	return `${rec.id} ${rec.status}${code} ${dur} · ${rec.label}`;
+	const outcome = exitText(rec);
+	return `${rec.id} ${rec.status}${outcome ? ` ${outcome}` : ""} ${dur} · ${rec.label}`;
 }
 
 export function terminalLevel(rec: TaskRecord): NoticeItem["level"] {

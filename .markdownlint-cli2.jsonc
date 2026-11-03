@@ -1,0 +1,6 @@
+{
+  // Prose is written one paragraph per line; line length is not enforced.
+  "config": {
+    "MD013": false
+  }
+}

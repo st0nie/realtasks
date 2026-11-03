@@ -4,7 +4,7 @@ import { registerShortcuts } from "../src/commands.ts";
 import { resolveConfig } from "../src/config.ts";
 import { Runtime } from "../src/runtime.ts";
 import { backgroundHint, foregroundWindowMs } from "../src/tools/bash.ts";
-import { humanMs, inputPreview, waitLine } from "../src/tools/render.ts";
+import { humanMs, inputPreview, statusRow, waitLine } from "../src/tools/render.ts";
 
 const th = { fg: (_c: string, s: string) => s, bold: (s: string) => s } as unknown as Theme;
 const base = { label: "npm test", id: "b7f3k9a2", capMs: 600_000 };
@@ -25,8 +25,13 @@ describe("render helpers", () => {
 		expect(waitLine({ ...base, phase: "done", waitedMs: 74_000, reason: "exit", status: "completed", exitCode: 0 }, th)).toBe(
 			"✓ npm test completed exit 0 · waited 1m14s",
 		);
-		expect(waitLine({ ...base, phase: "done", waitedMs: 3_000, reason: "grep" }, th)).toBe("✓ grep matched · waited 3s");
-		expect(waitLine({ ...base, phase: "done", waitedMs: 600_000, reason: "cap" }, th)).toBe("… still running · waited 10m00s (cap)");
+		expect(waitLine({ ...base, phase: "done", waitedMs: 3_000, reason: "match" }, th)).toBe("✓ npm test output matched · waited 3s");
+		expect(waitLine({ ...base, phase: "done", waitedMs: 600_000, reason: "timeout" }, th)).toBe("… still running · waited 10m00s (timeout)");
+		expect(waitLine({ ...base, phase: "done", waitedMs: 4_000, reason: "abort" }, th)).toBe("■ wait cancelled · 4s");
+	});
+	test("collapsed task_output row is the task status", () => {
+		expect(statusRow({ label: "npm test", id: "b7f3k9a2", status: "failed", exitCode: 1, cursor: 0 }, th)).toBe("· npm test failed exit 1");
+		expect(statusRow({ label: "dev", id: "bgkrw0t2", status: "running", cursor: 10 }, th)).toBe("· dev running");
 	});
 	test("input preview", () => {
 		expect(inputPreview("print(2+2)\\r", undefined, undefined)).toBe('"print(2+2)⏎"');

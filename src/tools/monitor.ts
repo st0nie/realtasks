@@ -5,7 +5,7 @@ import type { Runtime } from "../runtime.ts";
 import type { Task } from "../task.ts";
 import { eventBlock, signalBlock } from "../notify.ts";
 import { IS_WINDOWS } from "../proc.ts";
-import { oneLine, shQuote, stripAnsi } from "../text.ts";
+import { oneLine, shQuote, stripAnsi, userRegex } from "../text.ts";
 import { callLine, humanMs } from "./render.ts";
 
 export const BATCH_MS = 2000;
@@ -30,7 +30,7 @@ export class MonitorHub {
 
 	track(t: Task): void {
 		const f = t.rec.monitor?.filter;
-		this.states.set(t.rec.id, { re: f ? new RegExp(f) : undefined, lines: [], dropped: 0, window: [] });
+		this.states.set(t.rec.id, { re: f ? userRegex(f) : undefined, lines: [], dropped: 0, window: [] });
 	}
 
 	/** Called for every complete output line of a monitor task. */
@@ -135,10 +135,13 @@ export function registerMonitor(rt: Runtime, hub: MonitorHub): void {
 			),
 		}),
 		renderCall(args, th) {
-			const what = typeof args.file === "string" ? `file ${args.file}` : typeof args.command === "string" ? `$ ${oneLine(args.command, 60)}` : "";
-			const extra = [what, typeof args.filter === "string" ? `/${args.filter}/` : "", args.persistent ? "session" : typeof args.timeout_ms === "number" ? `for ${humanMs(args.timeout_ms)}` : ""]
-				.filter(Boolean)
-				.join(" · ");
+			let what = "";
+			if (typeof args.file === "string") what = `file ${args.file}`;
+			else if (typeof args.command === "string") what = `$ ${oneLine(args.command, 60)}`;
+			let span = "";
+			if (args.persistent) span = "session";
+			else if (typeof args.timeout_ms === "number") span = `for ${humanMs(args.timeout_ms)}`;
+			const extra = [what, typeof args.filter === "string" ? `/${args.filter}/` : "", span].filter(Boolean).join(" · ");
 			return callLine(th, "monitor", typeof args.description === "string" ? args.description : "…", extra || undefined);
 		},
 		async execute(toolCallId, p, _s, _u, ctx) {
@@ -147,7 +150,7 @@ export function registerMonitor(rt: Runtime, hub: MonitorHub): void {
 			const hasFile = Boolean(p.file);
 			if (hasCommand === hasFile) throw new Error("Give exactly one of command or file.");
 			// Validate the filter up front so a bad regex fails the call, not the stream.
-			if (p.filter) new RegExp(p.filter);
+			if (p.filter) userRegex(p.filter);
 			rt.manager.assertCapacity();
 			const persistent = Boolean(p.persistent);
 			const timeoutMs = persistent ? undefined : Math.max(1000, p.timeout_ms ?? 300_000);

@@ -86,7 +86,7 @@ describe("bash override", () => {
 	test("timeout is ignored with run_in_background; nothing kills on time", async () => {
 		const r = await env.call("bash", { command: "sleep 1.5; echo ok", run_in_background: true, timeout: 1, notify: "silent" });
 		const id = taskId(r);
-		const out = await env.call("task_output", { id, wait_ms: 5000 });
+		const out = await env.call("task_wait", { id, timeout_ms: 5000 });
 		expect(text(out)).toContain("completed");
 		expect(text(out)).not.toContain("timed_out");
 	});
@@ -97,9 +97,9 @@ describe("task tools", () => {
 	test("exit-file wrapper records real exit code; cursors return only new output (flow 6)", async () => {
 		const r = await env.call("bash", { command: "echo one; sleep 0.4; echo two; exit 7", run_in_background: true });
 		const id = taskId(r);
-		const first = await env.call("task_output", { id, wait_ms: 3000, grep: "one" });
+		const first = await env.call("task_wait", { id, timeout_ms: 3000, until: "one" });
 		expect(text(first)).toContain("one");
-		const second = await env.call("task_output", { id, wait_ms: 3000 });
+		const second = await env.call("task_wait", { id, timeout_ms: 3000 });
 		expect(text(second)).toContain("two");
 		expect(text(second)).not.toContain("one\n");
 		expect(text(second)).toContain("failed exit=7");
@@ -118,11 +118,102 @@ describe("task tools", () => {
 		const inp = await env.call("task_input", { id, text: "ping\\n", wait_ms: 300 });
 		expect(text(inp)).toContain("ping");
 		await env.call("task_input", { id, eof: true, wait_ms: 300 });
-		const out = await env.call("task_output", { id, wait_ms: 3000, from: "start" });
+		await env.call("task_wait", { id, timeout_ms: 3000 });
+		const out = await env.call("task_output", { id, from: "start" });
 		expect(text(out)).toContain("ping");
 		expect(text(out)).toContain("completed exit=0");
 	});
 
+	test("task_output never blocks on a running task", async () => {
+		const r = await env.call("bash", { command: "sleep 30", run_in_background: true, notify: "silent" });
+		const id = taskId(r);
+		const t0 = Date.now();
+		const out = await env.call("task_output", { id });
+		expect(Date.now() - t0).toBeLessThan(500);
+		expect(text(out)).toContain("running");
+		expect(text(out)).toContain("output: (no new output)");
+		expect(out.details).toMatchObject({ id, status: "running" });
+		await env.call("task_stop", { id, grace_ms: 200 });
+	});
+
+	test("peek and lines leave the cursor and the notification alone (flow 8)", async () => {
+		const r = await env.call("bash", { command: "printf 'a1\\nb2\\nerror c3\\nd4\\n'", run_in_background: true });
+		const id = taskId(r);
+		const json = join(dir, "s-int", `${id}.json`);
+		await until(() => readFileSync(json, "utf8").includes('"status": "completed"'), 6000);
+		const peek = await env.call("task_output", { id, peek: true });
+		expect(text(peek)).toContain("completed exit=0");
+		expect(text(peek)).toContain("b2");
+		expect(text(peek)).toContain("cursor: 0 (unchanged by peek");
+		const range = text(await env.call("task_output", { id, lines: "2-3" }));
+		expect(range).toContain("lines: 2-3 of 4");
+		expect(range).toContain("output:\n2: b2\n3: error c3\ncursor: 0");
+		const hits = text(await env.call("task_output", { id, lines: "1-", grep: "error" }));
+		expect(hits).toContain("grep: 1 of 4 lines match");
+		expect(hits).toContain("output:\n3: error c3\ncursor: 0");
+		const rec = JSON.parse(readFileSync(json, "utf8"));
+		expect(rec.notified).toBe(false);
+		expect(rec.cursor ?? 0).toBe(0);
+		// The notification still arrives after the peeks.
+		await new Promise((res) => setTimeout(res, 400));
+		const settle = (await env.emit("agent_before_settle", { type: "agent_before_settle", entries: [], continue: false }, env.ctx)) as
+			| { entries: Array<{ content: string }> }
+			| undefined;
+		expect(settle?.entries.some((e) => e.content.includes(`id="${id}"`))).toBe(true);
+		// A plain read still sees the output as new and moves the cursor.
+		const plain = text(await env.call("task_output", { id }));
+		expect(plain).toContain("output:\na1\nb2");
+		expect(plain).not.toContain("unchanged by peek");
+		expect(JSON.parse(readFileSync(json, "utf8")).cursor).toBeGreaterThan(0);
+	});
+
+	test("task_wait on several tasks returns on the first exit (flow 9)", async () => {
+		const slow = taskId(await env.call("bash", { command: "echo slow-start; sleep 30", run_in_background: true, notify: "silent" }));
+		const fast = taskId(await env.call("bash", { command: "sleep 0.5; echo fast-done", run_in_background: true, notify: "silent" }));
+		const t0 = Date.now();
+		const out = await env.call("task_wait", { id: [slow, fast, fast], timeout_ms: 10_000 });
+		expect(Date.now() - t0).toBeLessThan(5000);
+		const body = text(out);
+		expect(body.startsWith(`woke on: ${fast} (exit)`)).toBe(true);
+		// One block per task, in the given order, duplicates merged.
+		expect(body.indexOf(`${slow} [shell] running`)).toBeGreaterThan(0);
+		expect(body.indexOf(`${fast} [shell] completed exit=0`)).toBeGreaterThan(body.indexOf(`${slow} [shell] running`));
+		expect(body.split(`label: `).length - 1).toBe(2);
+		expect(body).toContain("slow-start");
+		expect(body).toContain("fast-done");
+		expect(out.details).toMatchObject({ phase: "done", reason: "exit", id: fast, status: "completed", exitCode: 0 });
+		// task_wait consumed the output: a later read has nothing new.
+		expect(text(await env.call("task_output", { id: slow }))).toContain("output: (no new output)");
+		// A task that already ended makes the wait return at once.
+		const t1 = Date.now();
+		const again = await env.call("task_wait", { id: [slow, fast], timeout_ms: 10_000 });
+		expect(Date.now() - t1).toBeLessThan(1000);
+		expect(text(again).startsWith(`woke on: ${fast} (exit)`)).toBe(true);
+		await env.call("task_stop", { id: slow, grace_ms: 200 });
+	});
+
+	test("task_wait until match, timeout, and running tasks", async () => {
+		const a = taskId(await env.call("bash", { command: "sleep 30", run_in_background: true, notify: "silent" }));
+		const b = taskId(await env.call("bash", { command: "sleep 0.3; echo READY now; sleep 30", run_in_background: true, notify: "silent" }));
+		const out = await env.call("task_wait", { id: [a, b], timeout_ms: 10_000, until: "READY" });
+		expect(text(out).startsWith(`woke on: ${b} (match)`)).toBe(true);
+		expect(text(out)).toContain("READY now");
+		expect(out.details).toMatchObject({ reason: "match", id: b, status: "running" });
+		const t0 = Date.now();
+		const timed = await env.call("task_wait", { id: a, timeout_ms: 300 });
+		expect(Date.now() - t0).toBeLessThan(2000);
+		expect(text(timed)).toMatch(/^timed out after /);
+		expect(text(timed)).toContain(`${a} [shell] running`);
+		expect(timed.details).toMatchObject({ reason: "timeout", id: a });
+		// Esc (the tool's abort signal) ends the wait; nothing else does.
+		const ac = new AbortController();
+		setTimeout(() => ac.abort(), 200);
+		const tool = env.tools.get("task_wait");
+		const cancelled = (await tool?.execute("call-abort", { id: a, timeout_ms: 60_000 }, ac.signal, undefined, env.ctx)) as Res;
+		expect(text(cancelled)).toMatch(/^cancelled after /);
+		expect(cancelled.details).toMatchObject({ reason: "abort" });
+		await env.call("task_stop", { id: "all", grace_ms: 200 });
+	});
 	test("task_input without stdin explains", async () => {
 		const r = await env.call("bash", { command: "sleep 3", run_in_background: true, notify: "silent" });
 		const id = taskId(r);
@@ -144,7 +235,7 @@ describe("task tools", () => {
 			notify: "silent",
 		});
 		const id = taskId(r);
-		await env.call("task_output", { id, wait_ms: 5000, grep: "tick" });
+		await env.call("task_wait", { id, timeout_ms: 5000, until: "tick" });
 		await env.call("task_stop", { id, grace_ms: 500 });
 		const log = join(dir, "s-int", `${id}.log`);
 		await new Promise((res) => setTimeout(res, 1000));
@@ -237,7 +328,7 @@ describe("monitor", () => {
 			max_events_per_min: 5,
 		});
 		const id = /Monitor (m[0-9a-z]{7})/.exec(text(r))?.[1] as string;
-		const out = await env.call("task_output", { id, wait_ms: 4000 });
+		const out = await env.call("task_wait", { id, timeout_ms: 4000 });
 		expect(text(out)).toContain("stopped");
 	});
 });
@@ -291,7 +382,7 @@ describe("reload re-adoption (flow 5)", () => {
 		const fresh = setup();
 		await fresh.emit("session_start", { type: "session_start", reason: "reload" }, fresh.ctx);
 		expect(handleTable().has(id)).toBe(false);
-		const out = await fresh.call("task_output", { id, wait_ms: 5000 });
+		const out = await fresh.call("task_wait", { id, timeout_ms: 5000 });
 		expect(text(out)).toContain("failed exit=1");
 		env = fresh;
 	});

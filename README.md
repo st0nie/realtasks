@@ -2,7 +2,7 @@
 
 Background tasks for [Pi](https://pi.dev). You start a command, keep working, and get told once when it ends. It also drives interactive programs through stdin or a PTY.
 
-realtasks overrides `bash` and adds `task_output`, `task_input`, `task_stop`, `task_list` and `monitor`. It works with rtk's Pi hook and with goal plugins such as pi-codex-goal.
+realtasks overrides `bash` and adds `task_output`, `task_wait`, `task_input`, `task_stop`, `task_list` and `monitor`. It works with rtk's Pi hook and with goal plugins such as pi-codex-goal.
 
 The full design is in [docs/realtasks-architecture.md](docs/realtasks-architecture.md).
 
@@ -44,7 +44,8 @@ Output goes to `~/.pi/agent/tasks/<session>/<id>.log`. Logs rotate at 50 MB and 
 
 | Tool | Purpose |
 | --- | --- |
-| `task_output` | New output since the last read. `wait_ms` waits for exit or a `grep` match. `from: "start"` rereads from the beginning |
+| `task_output` | New output since the last read. Never blocks. `grep` filters lines; `from: "start"` rereads from the beginning. `peek: true` looks without moving the cursor or using up the completion notification; `lines: "120-260"` reads numbered log lines (also a peek) |
+| `task_wait` | Blocks until a task exits, its output matches `until`, or `timeout_ms` passes, then returns the new output. Takes an array of ids and returns when any of them is done. Use it only when there is nothing else to do; the completion notification already says when a task ends |
 | `task_input` | Send `text` (C escapes such as `\r` and `\x03`) or `keys` (`ctrl-c`, `enter`, `up`), or `eof` |
 | `task_stop` | SIGTERM the process group, then SIGKILL after `grace_ms` (Windows: force-kills all of the task's processes at once). Accepts an id or `all` |
 | `task_list` | Ids, status, age, label, unread outcomes |
@@ -54,7 +55,7 @@ Output goes to `~/.pi/agent/tasks/<session>/<id>.log`. Logs rotate at 50 MB and 
 
 - The dock above the editor draws running and just-finished tasks as a tree, with an animated star spinner for running ones:
 
-  ```
+  ```text
   ● Tasks (2 running · 1 done)
   ├─ ✱ bxomyvwe npm test · 42s │ test 31 ok
   ├─ ◉ mshcwo0p app errors · 12s │ ERROR boom 3

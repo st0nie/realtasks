@@ -60,7 +60,7 @@ export interface TaskRecord {
 	monitor?: MonitorSpec;
 	/** Set once a one-shot signal was sent. */
 	signals?: { stall?: boolean; ready?: boolean; logCap?: boolean; flood?: boolean };
-	/** Agent's task_output byte cursor into the current log file. */
+	/** Agent's task_output/task_wait byte cursor into the current log file. */
 	cursor?: number;
 	/** Set when the user (not the agent) started it via /bg <cmd>. */
 	userStarted?: boolean;

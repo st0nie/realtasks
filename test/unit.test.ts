@@ -6,6 +6,7 @@ import { DEFAULTS, loadConfig, mergeConfig, resolveConfig } from "../src/config.
 import { Notifier, type NoticeItem, terminalBlock } from "../src/notify.ts";
 import { commandFromBranch, recoverCommand, stashCommand } from "../src/rtk.ts";
 import { findKeyConflict } from "../src/commands.ts";
+import { formatLineRange, parseLineRange } from "../src/output.ts";
 import {
 	cleanOutput,
 	collapseCR,
@@ -314,5 +315,40 @@ describe("notifier latch", () => {
 		n.flush();
 		expect(sent.length).toBe(1);
 		expect(notified.has("a")).toBe(true);
+	});
+});
+
+describe("lines ranges (task_output lines)", () => {
+	test("parse", () => {
+		expect(parseLineRange("120-260")).toEqual({ first: 120, last: 260 });
+		expect(parseLineRange(" 120 - ")).toEqual({ first: 120, last: undefined });
+		expect(parseLineRange("7")).toEqual({ first: 7, last: 7 });
+		for (const bad of ["0", "0-3", "5-3", "abc", "-5", "1-2-3", ""]) expect(() => parseLineRange(bad)).toThrow(/Bad lines range/);
+	});
+	test("numbered slice of the cleaned log", () => {
+		const r = formatLineRange("a\r\nb\n\x1b[31mc\x1b[0m\nd\n", { first: 2, last: 3 }, undefined, 200);
+		expect(r).toEqual({ header: "lines: 2-3 of 4\n", text: "2: b\n3: c" });
+		expect(formatLineRange("a\nb", { first: 2 }, undefined, 200).text).toBe("2: b");
+		expect(formatLineRange("a\nb\n", { first: 1, last: 99 }, undefined, 200).header).toBe("lines: 1-2 of 2\n");
+	});
+	test("grep filters inside the range and keeps line numbers", () => {
+		const r = formatLineRange("ok 1\nerror: x\nok 2\nerror: y\n", { first: 1 }, /error/, 200);
+		expect(r.header).toBe("lines: 1-4 of 4 · grep: 2 of 4 lines match\n");
+		expect(r.text).toBe("2: error: x\n4: error: y");
+		// The regex sees the log line, not the number prefix.
+		expect(formatLineRange("x\ny\n", { first: 1 }, /^y/, 200).text).toBe("2: y");
+	});
+	test("keeps the start of the range and names the next range", () => {
+		const log = Array.from({ length: 10 }, (_, i) => `L${i + 1}`).join("\n");
+		const closed = formatLineRange(log, { first: 2, last: 9 }, undefined, 3);
+		expect(closed.text).toBe('2: L2\n3: L3\n4: L4\n\n[Showing 3 of 8 lines. Next: lines "5-9"]');
+		const open = formatLineRange(log, { first: 2 }, undefined, 3);
+		expect(open.text.endsWith('[Showing 3 of 9 lines. Next: lines "5-"]')).toBe(true);
+		const grep = formatLineRange(log, { first: 1 }, /L[13579]$/, 2);
+		expect(grep.text).toBe('1: L1\n3: L3\n\n[Showing 2 of 5 lines. Next: lines "5-"]');
+	});
+	test("past the end and empty logs", () => {
+		expect(formatLineRange("a\nb\n", { first: 5 }, undefined, 200)).toEqual({ header: "lines: 5- is past the end (log has 2 lines)\n", text: "" });
+		expect(formatLineRange("", { first: 1, last: 1 }, undefined, 200).header).toBe("lines: 1-1 is past the end (log has 0 lines)\n");
 	});
 });

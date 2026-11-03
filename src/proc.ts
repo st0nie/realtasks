@@ -100,22 +100,19 @@ export function spawnTask(o: SpawnOpts): Spawned {
 		PI_TASK_CMD: o.command,
 		PI_TASK_SHELL: o.shell,
 		PI_TASK_EXIT: o.exitPath,
-		...(IS_WINDOWS
-			? {
-					PI_TASK_LOG: o.logPath,
-					PI_TASK_ERR: o.errPath ?? "",
-					// PTY output is written by the runtime, so only pipe mode reopens the log.
-					PI_TASK_WRAPPER: o.tty ? WRAPPER : WRAPPER_WIN,
-				}
-			: {}),
 	};
+	if (IS_WINDOWS) {
+		env.PI_TASK_LOG = o.logPath;
+		env.PI_TASK_ERR = o.errPath ?? "";
+		// PTY output is written by the runtime, so only pipe mode reopens the log.
+		env.PI_TASK_WRAPPER = o.tty ? WRAPPER : WRAPPER_WIN;
+	}
 	// Windows has no /bin/sh: the resolved bash (Git Bash, MSYS2, Cygwin) runs the wrapper itself.
 	// The wrapper goes through the env: node-pty's command-line quoting garbles its nested quotes.
-	const [file, args] = o.argv
-		? [o.argv[0], o.argv.slice(1)]
-		: IS_WINDOWS
-			? [o.shell, ["-c", 'eval "$PI_TASK_WRAPPER"']]
-			: ["/bin/sh", ["-c", WRAPPER]];
+	let file = "/bin/sh";
+	let args = ["-c", WRAPPER];
+	if (o.argv) [file, ...args] = o.argv;
+	else if (IS_WINDOWS) [file, args] = [o.shell, ["-c", 'eval "$PI_TASK_WRAPPER"']];
 
 	if (o.tty) {
 		// PTY output is appended by the runtime; create the log now so readers never see ENOENT.

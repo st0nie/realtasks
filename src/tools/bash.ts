@@ -124,14 +124,18 @@ export function registerBash(rt: Runtime): void {
 		promptGuidelines: [
 			"Long or unbounded commands (test suites, builds, servers): use bash with run_in_background=true, or let them pass their timeout and move to the background. You will get one <task-notification> when the task ends; do not poll or sleep while waiting.",
 			"Dev servers: bash with run_in_background=true and ready={port|url|pattern}; it returns once the server is ready.",
-			"Read task output with task_output (use wait_ms to wait for exit or a grep match instead of sleep loops). Drive interactive tasks (tty/stdin) with task_input; stop with task_stop; list with task_list.",
+			"Read task output with task_output; it never blocks, and peek: true or lines looks at a log without moving the read cursor or using up the completion notification. Drive interactive tasks (tty/stdin) with task_input; stop with task_stop; list with task_list.",
+			"Use task_wait (blocks until a task exits or matches until) only when nothing else is left to do; to hear about matching lines without blocking, use monitor.",
 			"For per-line event streams (tail -f, log watching) use the monitor tool, not bash.",
 		],
 		parameters: bashParams,
 		outputSchema: builtin.outputSchema,
 		renderCall: builtin.renderCall,
 		renderResult(result, options, theme, context) {
-			const c = builtin.renderResult!(result as AgentToolResult<BashToolDetails | undefined>, options, theme, context);
+			const base = builtin.renderResult;
+			// Pi's bash always defines it; fall back to plain text rather than assert.
+			if (!base) return new Text(result.content.map((p) => (p.type === "text" ? p.text : "")).join(""), 0, 0);
+			const c = base(result as AgentToolResult<BashToolDetails | undefined>, options, theme, context);
 			const hint = (result.details as BashDetails | undefined)?.hint;
 			// Pi's renderer clears and rebuilds the container each call, so the hint never stacks.
 			if (options.isPartial && hint && c instanceof Container) c.addChild(new Text(`\n${theme.fg("dim", hint)}`, 0, 0));

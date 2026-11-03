@@ -5,7 +5,7 @@ import { connect } from "node:net";
 import type { Handle } from "./proc.ts";
 import { IS_WINDOWS, isStillRunning, killGroup, readExitFile } from "./proc.ts";
 import { fileSize, OutputRing, readRange } from "./output.ts";
-import { stripAnsi } from "./text.ts";
+import { stripAnsi, userRegex } from "./text.ts";
 import type { ReadySpec, TaskRecord, TaskStatus } from "./types.ts";
 
 export const TAIL_POLL_MS = 250;
@@ -35,7 +35,7 @@ export class Task {
 	ring = new OutputRing();
 	/** Bytes of the log consumed by the tailer (absolute offset in the current file). */
 	tailOffset = 0;
-	/** Agent's task_output cursor. */
+	/** Agent's read cursor (task_output, task_wait). */
 	agentCursor = 0;
 	/** Bytes removed from the log head by rotation; offsets are file-relative. */
 	rotatedBytes = 0;
@@ -164,8 +164,11 @@ export class Task {
 		if (!this.running) return;
 		if (isStillRunning(this.rec.pid, this.rec.pidStart)) return;
 		const code = readExitFile(this.rec.exitPath);
-		if (code !== undefined) this.finish(this.classify(code, undefined));
-		else this.finish({ status: this.stopRequested ? "stopped" : this.timedOut ? "timed_out" : "lost" });
+		if (code !== undefined) return this.finish(this.classify(code, undefined));
+		let status: TaskStatus = "lost";
+		if (this.stopRequested) status = "stopped";
+		else if (this.timedOut) status = "timed_out";
+		this.finish({ status });
 	}
 
 	private finishFromCode(code: number | undefined, signal: string | undefined): void {
@@ -299,7 +302,7 @@ export class Task {
 	/** Wait until a readiness condition fires, the task exits, or the timeout passes. */
 	waitReady(spec: ReadySpec, signal?: AbortSignal): Promise<ReadyResult> {
 		const timeoutMs = spec.timeout_ms ?? 60_000;
-		const re = spec.pattern ? new RegExp(spec.pattern, "m") : undefined;
+		const re = spec.pattern ? userRegex(spec.pattern, "m") : undefined;
 		return new Promise((resolve) => {
 			let done = false;
 			const timers: Array<ReturnType<typeof setTimeout>> = [];

@@ -1,5 +1,5 @@
 // TUI renderers for the task tools: name tasks by label, show human durations,
-// and a live "waiting" line for task_output.
+// and a live "waiting" line for task_wait.
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Text, type Component } from "@earendil-works/pi-tui";
@@ -48,9 +48,26 @@ export function callLine(th: Theme, tool: string, name: string, extra?: string):
 	return new Text(`${head} ${th.fg("accent", name)}${tail}`, 0, 0);
 }
 
-/** Details task_output sends while waiting (via onUpdate) and when done. */
+/** Details task_output returns. */
+export interface ReadDetails {
+	label: string;
+	id: string;
+	status: string;
+	exitCode?: number;
+	/** The agent's cursor after the read (unchanged by a peek). */
+	cursor: number;
+}
+
+/** Collapsed task_output row: `· npm test completed exit 0`. */
+export function statusRow(d: ReadDetails, th: Theme): string {
+	const code = d.exitCode !== undefined ? ` exit ${d.exitCode}` : "";
+	return `${th.fg("dim", "·")} ${d.label} ${d.status}${code}`;
+}
+
+/** Details task_wait sends while waiting (via onUpdate) and when done. */
 export interface WaitDetails {
 	phase: "waiting" | "done";
+	/** Labels of the waited tasks while waiting; the task the wait ended on when done. */
 	label: string;
 	id: string;
 	waitedMs: number;
@@ -58,8 +75,8 @@ export interface WaitDetails {
 	startedAt?: number;
 	capMs: number;
 	last?: string;
-	/** Why the wait ended: exit, grep, cap, abort, or none (no wait requested). */
-	reason?: "exit" | "grep" | "cap" | "abort" | "none";
+	/** Why the wait ended: a task exited, its output matched `until`, the timeout passed, or Esc. */
+	reason?: "exit" | "match" | "timeout" | "abort";
 	status?: string;
 	exitCode?: number;
 }
@@ -72,20 +89,17 @@ export function waitLine(d: WaitDetails, th: Theme, now = Date.now()): string {
 		const tail = d.last ? th.fg("dim", ` │ ${oneLine(d.last, 80)}`) : "";
 		return `${th.fg("accent", spinnerFrame(now))} waiting for ${d.label} ${th.fg("dim", `· ${waited} of ${humanMs(d.capMs)}`)}${tail}`;
 	}
-	const code = d.exitCode !== undefined ? ` exit ${d.exitCode}` : "";
 	switch (d.reason) {
 		case "exit": {
-			const ok = d.status === "completed";
-			const mark = ok ? th.fg("success", "✓") : th.fg("error", "✗");
+			const code = d.exitCode !== undefined ? ` exit ${d.exitCode}` : "";
+			const mark = d.status === "completed" ? th.fg("success", "✓") : th.fg("error", "✗");
 			return `${mark} ${d.label} ${d.status}${code} ${th.fg("dim", `· waited ${waited}`)}`;
 		}
-		case "grep":
-			return `${th.fg("success", "✓")} grep matched ${th.fg("dim", `· waited ${waited}`)}`;
-		case "cap":
-			return `${th.fg("warning", "…")} still running ${th.fg("dim", `· waited ${waited} (cap)`)}`;
+		case "match":
+			return `${th.fg("success", "✓")} ${d.label} output matched ${th.fg("dim", `· waited ${waited}`)}`;
 		case "abort":
 			return `${th.fg("dim", "■")} wait cancelled ${th.fg("dim", `· ${waited}`)}`;
 		default:
-			return `${th.fg("dim", "·")} ${d.label} ${d.status ?? ""}${code}`;
+			return `${th.fg("warning", "…")} still running ${th.fg("dim", `· waited ${waited} (timeout)`)}`;
 	}
 }

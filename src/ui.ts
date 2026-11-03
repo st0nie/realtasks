@@ -6,7 +6,7 @@ import { matchesKey, Text, truncateToWidth, visibleWidth, type Component, type T
 import { readTail } from "./output.ts";
 import type { Runtime } from "./runtime.ts";
 import type { Task } from "./task.ts";
-import { cleanOutput, formatDuration, lastNonEmptyLine } from "./text.ts";
+import { cleanOutput, exitText, formatDuration, lastNonEmptyLine } from "./text.ts";
 import type { NotificationDetails } from "./notify.ts";
 
 export const DOCK_WIDGET = "realtasks-dock";
@@ -18,7 +18,7 @@ export const STATUS_KEY = "realtasks";
  * on Windows Terminal and emoji-font terminals, so ✱ (U+2731) replaces it.
  */
 const STAR = ["·", "✢", "✱", "✶", "✻", "✽"];
-export const SPINNER = [...STAR, ...STAR.slice(1, -1).reverse()];
+export const SPINNER = [...STAR, ...STAR.slice(1, -1).toReversed()];
 export const FRAME_MS = 120;
 export const LINGER_MS = 10_000;
 const DOCK_MAX_ROWS = 5;
@@ -59,7 +59,7 @@ function taskRow(t: Task, th: Theme, now: number): string {
 		if (last) row += th.fg("dim", ` │ ${last}`);
 		return row;
 	}
-	const code = r.exitCode !== undefined ? `exit ${r.exitCode}` : r.signal ? r.signal : r.status;
+	const code = exitText(r) ?? r.status;
 	parts.push(th.fg("dim", `· ${code} · ${formatDuration((r.endedAt ?? now) - r.startedAt)}`));
 	return parts.join(" ");
 }
@@ -75,7 +75,7 @@ export function dockLines(tasks: Task[], th: Theme, width: number, now = Date.no
 	const counts = [running ? `${running} running` : "", done ? `${done} done` : ""].filter(Boolean).join(" · ");
 	const lines = [fit(`${th.fg(color, running ? "●" : "○")} ${th.fg(color, `Tasks (${counts})`)}`)];
 	// Running first, then most recently finished.
-	const ordered = [...shown.filter((t) => t.running), ...shown.filter((t) => !t.running).reverse()];
+	const ordered = [...shown.filter((t) => t.running), ...shown.filter((t) => !t.running).toReversed()];
 	const visible = ordered.slice(0, DOCK_MAX_ROWS);
 	const hidden = ordered.length - visible.length;
 	visible.forEach((t, i) => {
@@ -214,7 +214,7 @@ export class TasksOverlay implements Component {
 	}
 
 	private tasks(): Task[] {
-		return this.rt.manager.list().slice().reverse();
+		return this.rt.manager.list().toReversed();
 	}
 
 	private current(): Task | undefined {
@@ -227,6 +227,7 @@ export class TasksOverlay implements Component {
 		const t = this.current();
 		this.flash = "";
 		if (matchesKey(data, "escape") || data === "q") return this.close(undefined);
+		if (t && data === "r") return this.close({ type: "restart", id: t.rec.id });
 		if (matchesKey(data, "up")) {
 			this.selected = Math.max(0, this.selected - 1);
 			this.scroll = 0;
@@ -250,8 +251,6 @@ export class TasksOverlay implements Component {
 		} else if (t && data === "i") {
 			if (t.running && t.hasInput) return this.close({ type: "input", id: t.rec.id });
 			this.flash = "Task has no open input";
-		} else if (t && data === "r") {
-			return this.close({ type: "restart", id: t.rec.id });
 		} else if (t && data === "c") {
 			void copyToClipboard(t.rec.logPath).then(
 				() => {
@@ -301,8 +300,8 @@ export class TasksOverlay implements Component {
 		if (cur) {
 			const r = cur.rec;
 			const cmd = r.rewritten ? `${r.requested} → ${r.executed}` : r.executed;
-			const code = r.exitCode !== undefined ? ` exit ${r.exitCode}` : r.signal ? ` ${r.signal}` : "";
-			right.push(th.bold(`${r.id} ${r.status}${code} · ${formatDuration((r.endedAt ?? Date.now()) - r.startedAt)}`));
+			const outcome = exitText(r);
+			right.push(th.bold(`${r.id} ${r.status}${outcome ? ` ${outcome}` : ""} · ${formatDuration((r.endedAt ?? Date.now()) - r.startedAt)}`));
 			right.push(th.fg("dim", `$ ${cmd}`));
 			right.push(th.fg("dim", `log: ${r.logPath}`));
 			const log = cleanOutput(cur.running ? cur.ring.recent() : readTail(r.logPath, 64 * 1024)).split("\n");
@@ -338,8 +337,11 @@ export function renderNotification(details: NotificationDetails | undefined, con
 	const items = details?.items ?? [];
 	if (expanded || items.length === 0) return new Text(th.fg("dim", content), 1, 0);
 	const lines = items.map((i) => {
-		const color = i.level === "error" ? "error" : i.level === "warning" ? "warning" : "success";
-		const mark = i.kind === "event" ? "◉" : i.level === "error" ? "✗" : i.level === "warning" ? "!" : "✓";
+		const color = i.level === "error" || i.level === "warning" ? i.level : "success";
+		let mark = "✓";
+		if (i.kind === "event") mark = "◉";
+		else if (i.level === "error") mark = "✗";
+		else if (i.level === "warning") mark = "!";
 		return `${th.fg(color, mark)} ${th.fg("dim", "task")} ${i.summary}`;
 	});
 	return new Text(lines.join("\n"), 1, 0);
