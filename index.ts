@@ -42,7 +42,7 @@ export default function realtasks(pi: ExtensionAPI): void {
 	});
 
 	pi.registerMessageRenderer<NotificationDetails>(NOTIFICATION_TYPE, (message, options, theme) =>
-		renderNotification(message.details, messageText(message.content), options.expanded, theme),
+		renderNotification(message.details, messageText(message.content), options, theme),
 	);
 
 	// rtk contract / recovery step 1: stash the command as this handler sees it.

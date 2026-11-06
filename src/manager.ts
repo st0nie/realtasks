@@ -3,7 +3,7 @@
 import { rmSync } from "node:fs";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import type { TasksConfig, NotifyPolicy } from "./config.ts";
-import { Notifier, type NotifierDeps, terminalBlock, terminalLevel, terminalSummary, signalBlock } from "./notify.ts";
+import { Notifier, type NotifierDeps, terminalBlock, terminalDetail, terminalLevel, terminalSummary, signalBlock } from "./notify.ts";
 import {
 	IS_WINDOWS,
 	handleTable,
@@ -403,6 +403,8 @@ export class TaskManager {
 						`Log passed ${Math.round(this.cfg.maxLogBytes / 1048576)} MB; dropped the oldest ${Math.round(dropped / 1024)} KB. The task keeps running.`,
 					),
 					summary: `${task.rec.id} log rotated`,
+					label: task.rec.label,
+					detail: "log rotated",
 					level: "warning",
 				});
 			},
@@ -431,6 +433,8 @@ export class TaskManager {
 			policy: t.rec.userStarted ? "silent" : t.rec.notify,
 			block: terminalBlock(t.rec, t.ring.recent()),
 			summary: terminalSummary(t.rec),
+			label: t.rec.label,
+			detail: terminalDetail(t.rec),
 			level: terminalLevel(t.rec),
 		});
 	}
@@ -471,6 +475,8 @@ export class TaskManager {
 				policy: "passive",
 				block: signalBlock(r.id, "stall", `No output for ${this.cfg.stallSeconds}s; last line looks like a prompt:\n${last}\n${hint}`),
 				summary: `${r.id} may be waiting for input`,
+				label: r.label,
+				detail: "may be waiting for input",
 				level: "warning",
 			});
 		}

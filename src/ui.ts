@@ -1,8 +1,8 @@
 // Dock widget, status counts, /tasks overlay, and the notification renderer.
 
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { copyToClipboard } from "@earendil-works/pi-coding-agent";
-import { matchesKey, Text, truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { copyToClipboard, keyHint } from "@earendil-works/pi-coding-agent";
+import { Box, matchesKey, Text, truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 import { readTail } from "./output.ts";
 import type { Runtime } from "./runtime.ts";
 import type { Task } from "./task.ts";
@@ -333,16 +333,91 @@ export class TasksOverlay implements Component {
 
 // ── notification renderer ──────────────────────────────────────
 
-export function renderNotification(details: NotificationDetails | undefined, content: string, expanded: boolean, th: Theme): Component {
+/** Output lines a collapsed notification card shows per task, like Pi's bash card. */
+export const CARD_PREVIEW_LINES = 5;
+
+export interface CardOptions {
+	expanded: boolean;
+	outputPad: number;
+	/** Pi 1.5 passes the user's key hint; older Pi falls back to the exported `keyHint`. */
+	keyHint?: (keybinding: "app.tools.expand", description: string) => string;
+}
+type CardItem = NotificationDetails["items"][number];
+
+interface NoticeBody {
+	command?: string;
+	log?: string;
+	output: string[];
+}
+
+/** Inner lines of each `<task-notification>` / `<task-event>` block, in message order. */
+export function parseBlocks(content: string): Array<{ id: string; inner: string[] }> {
+	const blocks: Array<{ id: string; inner: string[] }> = [];
+	for (const m of content.matchAll(/<(task-notification|task-event)\b([^>]*)>\n?([\s\S]*?)\n?<\/\1>/g)) {
+		const id = /\bid="([^"]*)"/.exec(m[2])?.[1] ?? "";
+		blocks.push({ id, inner: m[3] ? m[3].split("\n") : [] });
+	}
+	return blocks;
+}
+
+/** Split a block into command, output tail and log path by notice kind. */
+function noticeBody(kind: CardItem["kind"], inner: string[]): NoticeBody {
+	if (kind === "event") return { output: inner.slice(1) };
+	if (kind !== "terminal") return { output: [...inner] };
+	const lines = [...inner];
+	const body: NoticeBody = { output: [] };
+	if (lines.at(-1)?.startsWith("log: ")) body.log = lines.pop()?.slice(5);
+	const head = lines.shift() ?? "";
+	const at = head.indexOf(" — $ ");
+	if (at >= 0) body.command = head.slice(at + 5);
+	body.output = lines;
+	return body;
+}
+
+function noticeMark(i: CardItem, th: Theme): string {
+	if (i.level === "error") return th.fg("error", "✗");
+	if (i.level === "warning") return th.fg("warning", "!");
+	return th.fg("success", i.kind === "event" ? "◉" : "✓");
+}
+
+/** `✓ task npm test (b7f3k9a2) · completed exit 0 · 4s`, in the task tool-call style. */
+function noticeHeader(i: CardItem, th: Theme): string {
+	const title = th.fg("toolTitle", th.bold(i.kind === "event" ? "monitor" : "task"));
+	if (!i.label) return `${noticeMark(i, th)} ${title} ${i.summary}`;
+	const detail = i.detail ? th.fg("muted", ` · ${i.detail}`) : "";
+	return `${noticeMark(i, th)} ${title} ${th.fg("accent", i.label)} ${th.fg("dim", `(${i.id})`)}${detail}`;
+}
+
+function noticeSection(i: CardItem, inner: string[], opts: CardOptions, th: Theme): string {
+	const body = noticeBody(i.kind, inner);
+	const lines = [noticeHeader(i, th)];
+	if (opts.expanded && body.command) lines.push(th.fg("muted", `$ ${body.command}`));
+	const out = body.output;
+	while (out.length && !out.at(-1)?.trim()) out.pop();
+	if (out.length) {
+		const shown = opts.expanded ? out : out.slice(-CARD_PREVIEW_LINES);
+		const hidden = out.length - shown.length;
+		lines.push("");
+		if (hidden > 0) {
+			lines.push(`${th.fg("muted", `... (${hidden} earlier lines,`)} ${(opts.keyHint ?? keyHint)("app.tools.expand", "to expand")}${th.fg("muted", ")")}`);
+		}
+		lines.push(...shown.map((l) => th.fg("toolOutput", l)));
+	}
+	if (opts.expanded && body.log) lines.push("", th.fg("muted", `log: ${body.log}`));
+	return lines.join("\n");
+}
+
+/** Notification as a Pi tool card: tool background, padding, header + output preview. */
+export function renderNotification(details: NotificationDetails | undefined, content: string, opts: CardOptions, th: Theme): Component {
 	const items = details?.items ?? [];
-	if (expanded || items.length === 0) return new Text(th.fg("dim", content), 1, 0);
-	const lines = items.map((i) => {
-		const color = i.level === "error" || i.level === "warning" ? i.level : "success";
-		let mark = "✓";
-		if (i.kind === "event") mark = "◉";
-		else if (i.level === "error") mark = "✗";
-		else if (i.level === "warning") mark = "!";
-		return `${th.fg(color, mark)} ${th.fg("dim", "task")} ${i.summary}`;
-	});
-	return new Text(lines.join("\n"), 1, 0);
+	const bg = items.some((i) => i.level === "error") ? "toolErrorBg" : "toolSuccessBg";
+	const box = new Box(opts.outputPad, 1, (s) => th.bg(bg, s));
+	if (items.length === 0) {
+		box.addChild(new Text(th.fg("toolOutput", content), 0, 0));
+		return box;
+	}
+	const blocks = parseBlocks(content);
+	const sections = items.map((item, n) => noticeSection(item, blocks[n]?.id === item.id ? blocks[n].inner : [], opts, th));
+	box.addChild(new Text(sections.join("\n\n"), 0, 0));
+	return box;
 }

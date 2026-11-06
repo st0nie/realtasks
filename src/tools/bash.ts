@@ -272,6 +272,8 @@ function armLateReady(rt: Runtime, task: Task, ready: ReadySpec): void {
 			policy: "passive",
 			block: `<task-notification id="${task.rec.id}" signal="ready">\n${task.rec.label} is ready (${r.fired} matched).\n</task-notification>`,
 			summary: `${task.rec.id} ready`,
+			label: task.rec.label,
+			detail: "ready",
 			level: "info",
 		});
 	});

@@ -16,8 +16,12 @@ export interface NoticeItem {
 	kind: "terminal" | "signal" | "event";
 	policy: NotifyPolicy;
 	block: string;
-	/** Short one-line summary for UI toasts and the renderer. */
+	/** Short one-line summary for UI toasts (and the card header of older notices). */
 	summary: string;
+	/** Task label for the TUI card header. */
+	label?: string;
+	/** Outcome without id or label for the card header, e.g. `completed exit 0 · 4s`. */
+	detail?: string;
 	level: "info" | "warning" | "error";
 }
 
@@ -42,7 +46,7 @@ export interface NotifierDeps {
 }
 
 export interface NotificationDetails {
-	items: Array<{ id: string; kind: NoticeItem["kind"]; summary: string; level: NoticeItem["level"] }>;
+	items: Array<Pick<NoticeItem, "id" | "kind" | "summary" | "level" | "label" | "detail">>;
 }
 
 /** Build the `<task-notification>` block for a terminal task. */
@@ -65,6 +69,13 @@ export function terminalSummary(rec: TaskRecord, now = Date.now()): string {
 	const dur = formatDuration((rec.endedAt ?? now) - rec.startedAt);
 	const outcome = exitText(rec);
 	return `${rec.id} ${rec.status}${outcome ? ` ${outcome}` : ""} ${dur} · ${rec.label}`;
+}
+
+/** Card header outcome: `completed exit 0 · 4m12s`. */
+export function terminalDetail(rec: TaskRecord, now = Date.now()): string {
+	const dur = formatDuration((rec.endedAt ?? now) - rec.startedAt);
+	const outcome = exitText(rec);
+	return `${rec.status}${outcome ? ` ${outcome}` : ""} · ${dur}`;
 }
 
 export function terminalLevel(rec: TaskRecord): NoticeItem["level"] {
@@ -171,7 +182,9 @@ export class Notifier {
 	private compose(items: NoticeItem[]): { content: string; details: NotificationDetails } {
 		return {
 			content: items.map((i) => i.block).join("\n\n"),
-			details: { items: items.map(({ id, kind, summary, level }) => ({ id, kind, summary, level })) },
+			details: {
+				items: items.map(({ id, kind, summary, level, label, detail }) => ({ id, kind, summary, level, label, detail })),
+			},
 		};
 	}
 

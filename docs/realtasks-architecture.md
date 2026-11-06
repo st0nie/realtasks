@@ -136,6 +136,8 @@ log: ~/.pi/agent/tasks/<session>/b7f3k9a2.log
 
 Completed tasks get a status line plus a short tail; failed and timed-out tasks get a longer tail (40 lines). The message never instructs the agent to act; it informs.
 
+**TUI card.** In the TUI the message is drawn as a Pi tool card, so a finished task reads like a finished tool call: a box with Pi's tool background (`toolSuccessBg`, or `toolErrorBg` when any task in the message failed or timed out), one line of vertical padding and the user's `outputPad` horizontally. Each task gets a header in the style of the task tool calls, `✓ task npm test (b7f3k9a2) · completed exit 0 · 4m12s` (`monitor` instead of `task` for monitor events; the mark is colored by level), then its output tail in the `toolOutput` color. Collapsed, the tail shows its last 5 lines under `... (N earlier lines, ctrl+o to expand)`, like Pi's own `bash` card; expanded, it adds the `$ command` line under the header, the whole tail and the `log:` path. Several tasks coalesced into one message share one card with one section each, separated by a blank line. The notice details carry the label and outcome as separate fields (`label`, `detail`) for this header; notices from older sessions without them fall back to their one-line summary.
+
 **Delivery mapping onto Pi's `sendMessage`**
 
 | Agent state | `notify: wake` (default) | `notify: passive` | `notify: silent` |

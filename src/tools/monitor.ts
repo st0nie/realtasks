@@ -72,6 +72,8 @@ export class MonitorHub {
 			policy: t.rec.notify,
 			block: eventBlock(id, t.rec.label, lines, st.dropped),
 			summary: `${id} ${lines.length} event${lines.length === 1 ? "" : "s"} · ${t.rec.label}`,
+			label: t.rec.label,
+			detail: `${lines.length} event${lines.length === 1 ? "" : "s"}`,
 			level: "info",
 		});
 		st.dropped = 0;
@@ -95,6 +97,8 @@ export class MonitorHub {
 				`Monitor "${t.rec.label}" exceeded ${cap} events/min and was stopped. Narrow the filter or raise max_events_per_min.`,
 			),
 			summary: `${t.rec.id} monitor flooded, stopped`,
+			label: t.rec.label,
+			detail: "flooded, stopped",
 			level: "warning",
 		});
 		t.kill("SIGTERM", 2000);

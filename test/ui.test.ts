@@ -3,7 +3,8 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { TaskManager } from "../src/manager.ts";
 import { Task } from "../src/task.ts";
 import type { TaskRecord } from "../src/types.ts";
-import { dockLines, FRAME_MS, LINGER_MS, SPINNER, spinnerFrame, statusCounts } from "../src/ui.ts";
+import { terminalBlock, terminalDetail, terminalLevel, terminalSummary } from "../src/notify.ts";
+import { dockLines, FRAME_MS, LINGER_MS, renderNotification, SPINNER, spinnerFrame, statusCounts } from "../src/ui.ts";
 import { testConfig, tmpDir } from "./helpers.ts";
 
 const th = { fg: (_c: string, s: string) => s, bold: (s: string) => s } as unknown as Theme;
@@ -125,5 +126,59 @@ describe("/tasks clear", () => {
 		} finally {
 			cleanup();
 		}
+	});
+});
+
+describe("notification card", () => {
+	const bgTheme = { ...th, bg: (c: string, s: string) => `[${c}]${s}` } as unknown as Theme;
+	const hint = (_k: string, d: string) => `ctrl+o ${d}`;
+	const render = (r: TaskRecord, tail: string, expanded: boolean) => {
+		const item = {
+			id: r.id,
+			kind: "terminal" as const,
+			summary: terminalSummary(r),
+			level: terminalLevel(r),
+			label: r.label,
+			detail: terminalDetail(r),
+		};
+		const card = renderNotification({ items: [item] }, terminalBlock(r, tail), { expanded, outputPad: 1, keyHint: hint }, bgTheme);
+		return card.render(120).map((l) => l.trimEnd());
+	};
+	const tail = Array.from({ length: 8 }, (_, i) => `line ${i + 1}`).join("\n");
+	const done = rec("bdone001", { label: "npm test", executed: "npm test", status: "completed", exitCode: 0, startedAt: 0, endedAt: 4000 });
+
+	test("collapsed: tool-card background, header and a 5-line preview", () => {
+		const lines = render(done, tail, false);
+		expect(lines.every((l) => l.includes("[toolSuccessBg]"))).toBe(true);
+		const text = lines.map((l) => l.replaceAll("[toolSuccessBg]", "")).join("\n");
+		expect(text).toContain("✓ task npm test (bdone001) · completed exit 0 · 4s");
+		expect(text).toContain("... (3 earlier lines, ctrl+o to expand)");
+		expect(text).toContain("line 8");
+		expect(text).not.toContain("line 3");
+		expect(text).not.toContain("log:");
+	});
+	test("expanded: command, whole tail and log path", () => {
+		const text = render(done, tail, true).join("\n");
+		expect(text).toContain("$ npm test");
+		expect(text).toContain("line 1");
+		expect(text).toContain("log: /dev/null");
+		expect(text).not.toContain("to expand");
+	});
+	test("failed task uses the error background", () => {
+		const failed = { ...done, status: "failed" as const, exitCode: 1 };
+		const lines = render(failed, "boom", false);
+		expect(lines[0]).toContain("[toolErrorBg]");
+		expect(lines.join("\n")).toContain("✗ task npm test");
+	});
+	test("older notices without label fall back to the summary", () => {
+		const card = renderNotification(
+			{ items: [{ id: "bold0001", kind: "terminal", summary: "bold0001 completed exit 0 2s · build", level: "info" }] },
+			'<task-notification id="bold0001">\nbuild — $ make\nok\nlog: /x.log\n</task-notification>',
+			{ expanded: false, outputPad: 1, keyHint: hint },
+			bgTheme,
+		);
+		const text = card.render(120).join("\n");
+		expect(text).toContain("✓ task bold0001 completed exit 0 2s · build");
+		expect(text).toContain("ok");
 	});
 });
