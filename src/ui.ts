@@ -1,7 +1,7 @@
 // Dock widget, status counts, /tasks overlay, and the notification renderer.
 
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { copyToClipboard, keyHint } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, MessageRenderOptions, Theme } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard } from "@earendil-works/pi-coding-agent";
 import { Box, matchesKey, Text, truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 import { readTail } from "./output.ts";
 import type { Runtime } from "./runtime.ts";
@@ -336,12 +336,7 @@ export class TasksOverlay implements Component {
 /** Output lines a collapsed notification card shows per task, like Pi's bash card. */
 export const CARD_PREVIEW_LINES = 5;
 
-export interface CardOptions {
-	expanded: boolean;
-	outputPad: number;
-	/** Pi 1.5 passes the user's key hint; older Pi falls back to the exported `keyHint`. */
-	keyHint?: (keybinding: "app.tools.expand", description: string) => string;
-}
+export type CardOptions = Pick<MessageRenderOptions, "expanded" | "outputPad" | "keyHint">;
 type CardItem = NotificationDetails["items"][number];
 
 interface NoticeBody {
@@ -399,7 +394,7 @@ function noticeSection(i: CardItem, inner: string[], opts: CardOptions, th: Them
 		const hidden = out.length - shown.length;
 		lines.push("");
 		if (hidden > 0) {
-			lines.push(`${th.fg("muted", `... (${hidden} earlier lines,`)} ${(opts.keyHint ?? keyHint)("app.tools.expand", "to expand")}${th.fg("muted", ")")}`);
+			lines.push(`${th.fg("muted", `... (${hidden} earlier lines,`)} ${opts.keyHint("app.tools.expand", "to expand")}${th.fg("muted", ")")}`);
 		}
 		lines.push(...shown.map((l) => th.fg("toolOutput", l)));
 	}
