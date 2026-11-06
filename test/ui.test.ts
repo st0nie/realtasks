@@ -167,10 +167,10 @@ describe("notification card", () => {
 	const tail = Array.from({ length: 8 }, (_, i) => `line ${i + 1}`).join("\n");
 	const done = rec("bdone001", { label: "npm test", executed: "npm test", status: "completed", exitCode: 0, startedAt: 0, endedAt: 4000 });
 
-	test("collapsed: tool-card background, header and a 5-line preview", () => {
+	test("collapsed: custom-message background, header and a 5-line preview", () => {
 		const lines = render(done, tail, false);
-		expect(lines.every((l) => l.includes("[toolSuccessBg]"))).toBe(true);
-		const text = lines.map((l) => l.replaceAll("[toolSuccessBg]", "")).join("\n");
+		expect(lines.every((l) => l.includes("[customMessageBg]"))).toBe(true);
+		const text = lines.map((l) => l.replaceAll("[customMessageBg]", "")).join("\n");
 		expect(text).toContain("✓ task npm test (bdone001) · completed exit 0 · 4s");
 		expect(text).toContain("... (3 earlier lines, ctrl+o to expand)");
 		expect(text).toContain("line 8");
@@ -184,10 +184,10 @@ describe("notification card", () => {
 		expect(text).toContain("log: /dev/null");
 		expect(text).not.toContain("to expand");
 	});
-	test("failed task uses the error background", () => {
+	test("failed task shows error mark on the custom-message background", () => {
 		const failed = { ...done, status: "failed" as const, exitCode: 1 };
 		const lines = render(failed, "boom", false);
-		expect(lines[0]).toContain("[toolErrorBg]");
+		expect(lines[0]).toContain("[customMessageBg]");
 		expect(lines.join("\n")).toContain("✗ task npm test");
 	});
 	test("older notices without label fall back to the summary", () => {

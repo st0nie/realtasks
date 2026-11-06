@@ -425,15 +425,14 @@ function messageText(content: NotificationMessage["content"]): string {
 }
 
 /**
- * Notification as a Pi tool card: tool background, padding, header + output preview. A left click
+ * Notification as a Pi card: custom-message background, padding, header + output preview. A left click
  * anywhere on the card toggles it; the toggle is keyed by the message object, so it survives re-renders.
  */
 export function renderNotification(message: NotificationMessage, opts: CardOptions, th: Theme): Component {
 	const content = messageText(message.content);
 	const key = message;
 	const items = message.details?.items ?? [];
-	const bg = items.some((i) => i.level === "error") ? "toolErrorBg" : "toolSuccessBg";
-	const box = new Box(opts.outputPad, 1, (s) => th.bg(bg, s));
+	const box = new Box(opts.outputPad, 1, (s) => th.bg("customMessageBg", s));
 	const click = cardClicks.get(key);
 	if (click && click.base !== opts.expanded) cardClicks.delete(key);
 	let expanded = cardClicks.get(key)?.expanded ?? opts.expanded;
