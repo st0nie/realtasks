@@ -1,8 +1,8 @@
 // Dock widget, status counts, /tasks overlay, and the notification renderer.
 
-import type { ExtensionContext, MessageRenderOptions, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, MessageRenderer, MessageRenderOptions, Theme } from "@earendil-works/pi-coding-agent";
 import { copyToClipboard } from "@earendil-works/pi-coding-agent";
-import { Box, matchesKey, Text, truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { Box, matchesKey, MouseRegion, Text, truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 import { readTail } from "./output.ts";
 import type { Runtime } from "./runtime.ts";
 import type { Task } from "./task.ts";
@@ -402,17 +402,51 @@ function noticeSection(i: CardItem, inner: string[], opts: CardOptions, th: Them
 	return lines.join("\n");
 }
 
-/** Notification as a Pi tool card: tool background, padding, header + output preview. */
-export function renderNotification(details: NotificationDetails | undefined, content: string, opts: CardOptions, th: Theme): Component {
-	const items = details?.items ?? [];
+/** Card body for one expand state: header + output preview per task, or the raw text for an itemless notice. */
+function cardText(items: CardItem[], content: string, opts: CardOptions, th: Theme): string {
+	if (items.length === 0) return th.fg("toolOutput", content);
+	const blocks = parseBlocks(content);
+	return items.map((item, n) => noticeSection(item, blocks[n]?.id === item.id ? blocks[n].inner : [], opts, th)).join("\n\n");
+}
+
+/**
+ * Per-message click toggles. `base` is the global expand state the click was made under; once ctrl+o
+ * changes it, the click is dropped and the card follows the global state again, like Pi's tool cards.
+ */
+const cardClicks = new WeakMap<NotificationMessage, { base: boolean; expanded: boolean }>();
+
+/** A task-notification custom message, as Pi hands it to the message renderer. */
+export type NotificationMessage = Parameters<MessageRenderer<NotificationDetails>>[0];
+
+/** Plain text of a custom message's content. */
+function messageText(content: NotificationMessage["content"]): string {
+	if (typeof content === "string") return content;
+	return content.map((c) => (c.type === "text" ? c.text : "")).join("");
+}
+
+/**
+ * Notification as a Pi tool card: tool background, padding, header + output preview. A left click
+ * anywhere on the card toggles it; the toggle is keyed by the message object, so it survives re-renders.
+ */
+export function renderNotification(message: NotificationMessage, opts: CardOptions, th: Theme): Component {
+	const content = messageText(message.content);
+	const key = message;
+	const items = message.details?.items ?? [];
 	const bg = items.some((i) => i.level === "error") ? "toolErrorBg" : "toolSuccessBg";
 	const box = new Box(opts.outputPad, 1, (s) => th.bg(bg, s));
-	if (items.length === 0) {
-		box.addChild(new Text(th.fg("toolOutput", content), 0, 0));
-		return box;
-	}
-	const blocks = parseBlocks(content);
-	const sections = items.map((item, n) => noticeSection(item, blocks[n]?.id === item.id ? blocks[n].inner : [], opts, th));
-	box.addChild(new Text(sections.join("\n\n"), 0, 0));
-	return box;
+	const click = cardClicks.get(key);
+	if (click && click.base !== opts.expanded) cardClicks.delete(key);
+	let expanded = cardClicks.get(key)?.expanded ?? opts.expanded;
+	const fill = () => {
+		box.clear();
+		box.addChild(new Text(cardText(items, content, { ...opts, expanded }, th), 0, 0));
+	};
+	fill();
+	return new MouseRegion(box, (event) => {
+		if (event.type !== "click" || event.button !== "left") return undefined;
+		expanded = !expanded;
+		cardClicks.set(key, { base: opts.expanded, expanded });
+		fill();
+		return { handled: true };
+	});
 }

@@ -3,8 +3,9 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { TaskManager } from "../src/manager.ts";
 import { Task } from "../src/task.ts";
 import type { TaskRecord } from "../src/types.ts";
-import { terminalBlock, terminalDetail, terminalLevel, terminalSummary } from "../src/notify.ts";
-import { dockLines, FRAME_MS, LINGER_MS, renderNotification, SPINNER, spinnerFrame, statusCounts } from "../src/ui.ts";
+import type { Component } from "@earendil-works/pi-tui";
+import { NOTIFICATION_TYPE, type NotificationDetails, terminalBlock, terminalDetail, terminalLevel, terminalSummary } from "../src/notify.ts";
+import { dockLines, FRAME_MS, LINGER_MS, type NotificationMessage, renderNotification, SPINNER, spinnerFrame, statusCounts } from "../src/ui.ts";
 import { testConfig, tmpDir } from "./helpers.ts";
 
 const th = { fg: (_c: string, s: string) => s, bold: (s: string) => s } as unknown as Theme;
@@ -132,18 +133,37 @@ describe("/tasks clear", () => {
 describe("notification card", () => {
 	const bgTheme = { ...th, bg: (c: string, s: string) => `[${c}]${s}` } as unknown as Theme;
 	const hint = (_k: string, d: string) => `ctrl+o ${d}`;
-	const render = (r: TaskRecord, tail: string, expanded: boolean) => {
-		const item = {
-			id: r.id,
-			kind: "terminal" as const,
-			summary: terminalSummary(r),
-			level: terminalLevel(r),
-			label: r.label,
-			detail: terminalDetail(r),
-		};
-		const card = renderNotification({ items: [item] }, terminalBlock(r, tail), { expanded, outputPad: 1, keyHint: hint }, bgTheme);
-		return card.render(120).map((l) => l.trimEnd());
-	};
+	const opts = (expanded: boolean) => ({ expanded, outputPad: 1, keyHint: hint });
+	const message = (details: NotificationDetails, content: string): NotificationMessage => ({
+		role: "custom",
+		customType: NOTIFICATION_TYPE,
+		content,
+		display: true,
+		details,
+		timestamp: 0,
+	});
+	const notice = (r: TaskRecord, tail: string) =>
+		message(
+			{
+				items: [
+					{
+						id: r.id,
+						kind: "terminal",
+						summary: terminalSummary(r),
+						level: terminalLevel(r),
+						label: r.label,
+						detail: terminalDetail(r),
+					},
+				],
+			},
+			terminalBlock(r, tail),
+		);
+	const render = (r: TaskRecord, tail: string, expanded: boolean) =>
+		renderNotification(notice(r, tail), opts(expanded), bgTheme)
+			.render(120)
+			.map((l) => l.trimEnd());
+	const click = (card: Component, y: number, button: "left" | "right" = "left") =>
+		card.handleMouse?.({ type: "click", button, x: 0, y, screenX: 0, screenY: y, width: 120, height: 20, shift: false, alt: false, ctrl: false });
 	const tail = Array.from({ length: 8 }, (_, i) => `line ${i + 1}`).join("\n");
 	const done = rec("bdone001", { label: "npm test", executed: "npm test", status: "completed", exitCode: 0, startedAt: 0, endedAt: 4000 });
 
@@ -172,13 +192,38 @@ describe("notification card", () => {
 	});
 	test("older notices without label fall back to the summary", () => {
 		const card = renderNotification(
-			{ items: [{ id: "bold0001", kind: "terminal", summary: "bold0001 completed exit 0 2s · build", level: "info" }] },
-			'<task-notification id="bold0001">\nbuild — $ make\nok\nlog: /x.log\n</task-notification>',
-			{ expanded: false, outputPad: 1, keyHint: hint },
+			message(
+				{ items: [{ id: "bold0001", kind: "terminal", summary: "bold0001 completed exit 0 2s · build", level: "info" }] },
+				'<task-notification id="bold0001">\nbuild — $ make\nok\nlog: /x.log\n</task-notification>',
+			),
+			opts(false),
 			bgTheme,
 		);
 		const text = card.render(120).join("\n");
 		expect(text).toContain("✓ task bold0001 completed exit 0 2s · build");
 		expect(text).toContain("ok");
+	});
+	test("left click toggles one card, also on its padding row; other buttons do nothing", () => {
+		const msg = notice(done, tail);
+		const card = renderNotification(msg, opts(false), bgTheme);
+		const text = () => card.render(120).join("\n");
+		expect(text()).not.toContain("line 1");
+		expect(click(card, 0, "right")).toBeUndefined();
+		expect(click(card, 0)).toMatchObject({ handled: true });
+		expect(text()).toContain("line 1");
+		expect(text()).toContain("log: /dev/null");
+		click(card, 3);
+		expect(text()).not.toContain("line 1");
+		// another card of the same task is untouched
+		expect(render(done, tail, false).join("\n")).not.toContain("line 1");
+	});
+	test("a click survives re-renders until the global expand state changes", () => {
+		const msg = notice(done, tail);
+		click(renderNotification(msg, opts(false), bgTheme), 0);
+		// Pi rebuilds the card (resize, theme): the click still holds
+		expect(renderNotification(msg, opts(false), bgTheme).render(120).join("\n")).toContain("line 1");
+		// ctrl+o expands everything, then collapses everything: the click is gone
+		expect(renderNotification(msg, opts(true), bgTheme).render(120).join("\n")).toContain("line 1");
+		expect(renderNotification(msg, opts(false), bgTheme).render(120).join("\n")).not.toContain("line 1");
 	});
 });

@@ -42,7 +42,7 @@ export default function realtasks(pi: ExtensionAPI): void {
 	});
 
 	pi.registerMessageRenderer<NotificationDetails>(NOTIFICATION_TYPE, (message, options, theme) =>
-		renderNotification(message.details, messageText(message.content), options, theme),
+		renderNotification(message, options, theme),
 	);
 
 	// rtk contract / recovery step 1: stash the command as this handler sees it.
@@ -134,10 +134,4 @@ export default function realtasks(pi: ExtensionAPI): void {
 		};
 	});
 
-}
-
-/** Plain text of a custom message's content. */
-function messageText(content: string | ReadonlyArray<object>): string {
-	if (typeof content === "string") return content;
-	return content.map((c) => ("text" in c && typeof c.text === "string" ? c.text : "")).join("");
 }
