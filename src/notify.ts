@@ -7,6 +7,8 @@ import { cleanOutput, exitText, formatDuration, lastLines } from "./text.ts";
 export const NOTIFICATION_TYPE = "task-notification";
 export const EVENT_TYPE = "task-event";
 export const COALESCE_MS = 300;
+/** Wider idle coalescing window while sibling wake shell tasks are still running. */
+export const IDLE_RUNNING_COALESCE_MS = 1200;
 
 export type Mode = "tui" | "rpc" | "json" | "print";
 
@@ -37,6 +39,8 @@ export interface NotifierDeps {
 	toast(message: string, level: "info" | "warning" | "error"): void;
 	mode(): Mode;
 	isBusy(): boolean;
+	/** True while at least one running background shell task has `notify: "wake"`. */
+	hasRunningWake?(): boolean;
 	/** True if the agent already learned the terminal state of this task. */
 	isNotified(id: string): boolean;
 	/** Flip the latch for a task (persisting it). */
@@ -96,9 +100,10 @@ export function eventBlock(id: string, label: string, lines: string[], dropped =
 
 export class Notifier {
 	private pending: NoticeItem[] = [];
-	/** Wake items held for agent_before_settle in print/json mode or near settle. */
+	/** Wake items held for turn_end / agent_before_settle while busy or in print/json mode. */
 	private held: NoticeItem[] = [];
 	private timer: Timer | undefined;
+	private longTimer = false;
 	private readonly deps: NotifierDeps;
 
 	constructor(deps: NotifierDeps) {
@@ -107,22 +112,33 @@ export class Notifier {
 
 	queue(item: NoticeItem): void {
 		this.pending.push(item);
-		if (this.timer !== undefined) return;
+		const waitingOnRunning = !this.deps.isBusy() && Boolean(this.deps.hasRunningWake?.());
+		if (this.timer !== undefined) {
+			if (this.longTimer && !waitingOnRunning) {
+				this.cancelTimer();
+			} else {
+				return;
+			}
+		}
+		this.longTimer = waitingOnRunning;
+		const delay = waitingOnRunning ? IDLE_RUNNING_COALESCE_MS : COALESCE_MS;
 		const set = this.deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms).unref());
 		this.timer = set(() => {
 			this.timer = undefined;
+			this.longTimer = false;
 			this.flush();
-		}, COALESCE_MS);
+		}, delay);
 	}
 
-	/** Drop the latch-suppressed items, then deliver the rest by policy. */
+	/** Drop the latch-suppressed items, then deliver or hold the rest by policy and state. */
 	flush(): void {
 		this.cancelTimer();
 		const items = this.takeLive(this.pending);
 		this.pending = [];
-		if (items.length === 0) return;
 		const mode = this.deps.mode();
 		const headless = mode === "print" || mode === "json";
+		const busy = this.deps.isBusy();
+		if (items.length === 0 && (headless || busy || this.held.length === 0)) return;
 		const wake = items.filter((i) => i.policy === "wake");
 		const passive = items.filter((i) => i.policy === "passive");
 		const silent = items.filter((i) => i.policy === "silent");
@@ -133,29 +149,41 @@ export class Notifier {
 			this.held.push(...wake);
 			return;
 		}
-		if (wake.length) {
-			this.deliver(wake, this.deps.isBusy() ? { deliverAs: "steer" } : { triggerTurn: true });
-		}
 		if (passive.length) this.deliver(passive, { deliverAs: "nextTurn" });
+		if (busy) {
+			// Hold wake notices until turn_end / agent_before_settle so every task
+			// finishing during the turn arrives together in one message.
+			this.held.push(...wake);
+			return;
+		}
+		const readyWake = this.takeLive([...this.held, ...wake]);
+		this.held = [];
+		if (readyWake.length) {
+			this.deliver(readyWake, { triggerTurn: true });
+		}
 	}
 
 	/**
-	 * For agent_before_settle: take queued or held wake items as one message
-	 * body, latched. Returns undefined when there is nothing to deliver.
+	 * For turn_end and agent_before_settle: take queued or held wake items as
+	 * one message body, latched. Also flushes any pending passive/silent items.
+	 * Returns undefined when there is nothing to deliver.
 	 */
 	takeForSettle(): { content: string; details: NotificationDetails } | undefined {
 		const pendingWake = this.pending.filter((i) => i.policy === "wake");
 		this.pending = this.pending.filter((i) => i.policy !== "wake");
-		if (this.pending.length === 0) this.cancelTimer();
-		const items = this.takeLive([...this.held, ...pendingWake]);
+		const heldWake = this.held;
 		this.held = [];
+		if (this.pending.length > 0) this.flush();
+		else this.cancelTimer();
+		const items = this.takeLive([...heldWake, ...pendingWake]);
 		if (items.length === 0) return undefined;
 		for (const i of items) this.latch(i);
+		for (const i of items) this.toast(i);
 		return this.compose(items);
 	}
 
 	hasHeldWake(): boolean {
-		return this.held.length > 0 || this.pending.some((i) => i.policy === "wake");
+		return this.takeLive([...this.held, ...this.pending.filter((i) => i.policy === "wake")]).length > 0;
 	}
 
 	/** Drop everything without sending (session shutdown). */
@@ -210,6 +238,7 @@ export class Notifier {
 	}
 
 	private cancelTimer(): void {
+		this.longTimer = false;
 		if (this.timer === undefined) return;
 		if (this.deps.clearTimer) this.deps.clearTimer(this.timer);
 		else clearTimeout(this.timer as ReturnType<typeof setTimeout>);

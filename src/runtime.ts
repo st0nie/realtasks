@@ -35,7 +35,7 @@ export class Runtime {
 					if (this.ctx?.hasUI) this.ctx.ui.notify(msg, level);
 				},
 				mode: () => (this.ctx?.mode ?? "print") as Mode,
-				isBusy: () => this.busy,
+				isBusy: () => this.busy || (this.ctx ? !this.ctx.isIdle() : false),
 			},
 			{ changed: () => this.emitChange() },
 		);

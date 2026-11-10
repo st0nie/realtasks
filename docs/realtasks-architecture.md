@@ -140,16 +140,16 @@ Completed tasks get a status line plus a short tail; failed and timed-out tasks 
 
 A left click anywhere on the card, padding included, toggles just that card between collapsed and expanded, like a click on a Pi tool card. As for tool cards, this works only in Pi's fullscreen mode: regular mode leaves the mouse to the terminal, and ctrl+o is the keyboard path. The click state is kept per message, so redraws (resize, theme change) keep it. It lasts until the global expand toggle (ctrl+o) changes: then every card follows the global state again, the way Pi sets every tool card on ctrl+o.
 
-**Delivery mapping onto Pi's `sendMessage`**
+**Delivery mapping**
 
 | Agent state | `notify: wake` (default) | `notify: passive` | `notify: silent` |
 | --- | --- | --- | --- |
-| Streaming, mid-run | `deliverAs: "steer"`, lands at the next tool boundary | `deliverAs: "nextTurn"` | UI toast only |
+| Busy, mid-run | Held until `turn_end` (or `agent_before_settle`), injected as one `custom_message` with `continue: true` | `deliverAs: "nextTurn"` | UI toast only |
 | Idle | `triggerTurn: true`, agent reacts | `deliverAs: "nextTurn"` | UI toast only |
-| About to settle (`agent_before_settle`) | Returns `continue: true` once if a wake notification is queued | Nothing | Nothing |
-| Print / JSON mode | Held at `agent_before_settle` until running `wake` tasks finish, capped by `printModeMaxWaitMs` | Dropped | Dropped |
+| About to settle (`agent_before_settle`) | Appends one combined `custom_message` and returns `continue: true` if a wake notification is queued | Nothing | Nothing |
+| Print / JSON mode | Held at `turn_end` / `agent_before_settle` until running `wake` tasks finish, capped by `printModeMaxWaitMs` | Dropped | Dropped |
 
-**Coalescing.** Terminal events arriving within 300 ms of each other go out as one message with one block per task. Monitor events are batched per monitor every 2 s.
+**Coalescing.** While the agent is busy, all `wake` notifications are held until the turn boundary (`turn_end` or `agent_before_settle`) so every task that finished during the turn goes out together in a single message (bypassing Pi's `one-at-a-time` steering queue, and dropping any task the turn already read via `task_output` / `task_wait`). While idle, terminal events coalesce over a 300 ms window (extended to 1.2 s while sibling `wake` shell tasks are still running, and shortened back to 300 ms as soon as the last running `wake` task exits). Monitor events are batched per monitor every 2 s.
 
 **Goal-plugin compatibility** (pi-codex-goal and similar continuation drivers):
 

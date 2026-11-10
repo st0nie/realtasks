@@ -103,6 +103,50 @@ describe("bash override", () => {
 		expect(again).toBeUndefined();
 	});
 
+	test("multiple tasks finishing >300ms apart during a busy turn coalesce into one turn_end message", async () => {
+		const tui = fakeCtx(dir, "s-int", "tui");
+		await env.emit("agent_start", { type: "agent_start" }, tui.ctx);
+		try {
+			const r1 = await env.call("bash", { command: "sleep 0.1; echo batch-one", run_in_background: true });
+			const r2 = await env.call("bash", { command: "sleep 0.6; echo batch-two", run_in_background: true });
+			const r3 = await env.call("bash", { command: "sleep 0.1; echo read-early", run_in_background: true });
+			const id1 = taskId(r1);
+			const id2 = taskId(r2);
+			const id3 = taskId(r3);
+			await until(
+				() =>
+					readFileSync(join(dir, "s-int", `${id1}.json`), "utf8").includes('"status": "completed"') &&
+					readFileSync(join(dir, "s-int", `${id2}.json`), "utf8").includes('"status": "completed"') &&
+					readFileSync(join(dir, "s-int", `${id3}.json`), "utf8").includes('"status": "completed"'),
+				6000,
+			);
+			// Wait past the 300ms timer after the second task; while busy, no piecemeal steer messages are sent.
+			await new Promise((r) => setTimeout(r, 400));
+			expect(env.sent.length).toBe(0);
+			// Reading id3 during the turn flips its latch before turn_end.
+			await env.call("task_output", { id: id3 });
+			const turnEnd = (await env.emit(
+				"turn_end",
+				{ type: "turn_end", outcome: "completed", entries: [], continue: false },
+				tui.ctx,
+			)) as { entries: Array<{ content: string; details: { items: Array<{ id: string }> } }>; continue: boolean };
+			expect(turnEnd.continue).toBe(true);
+			expect(turnEnd.entries.length).toBe(1);
+			expect(turnEnd.entries[0].content).toContain(`id="${id1}"`);
+			expect(turnEnd.entries[0].content).toContain("batch-one");
+			expect(turnEnd.entries[0].content).toContain(`id="${id2}"`);
+			expect(turnEnd.entries[0].content).toContain("batch-two");
+			expect(turnEnd.entries[0].content).not.toContain(`id="${id3}"`);
+			expect(turnEnd.entries[0].details.items.map((i) => i.id)).toEqual([id1, id2]);
+			// Nothing left for agent_before_settle after turn_end already delivered them.
+			const settle = await env.emit("agent_before_settle", { type: "agent_before_settle", entries: [], continue: false }, tui.ctx);
+			expect(settle).toBeUndefined();
+		} finally {
+			await env.emit("agent_end", { type: "agent_end" }, tui.ctx);
+			await env.emit("agent_settled", { type: "agent_settled", aborted: false }, env.ctx);
+		}
+	});
+
 	test("timeout is ignored with run_in_background; nothing kills on time", async () => {
 		const r = await env.call("bash", { command: "sleep 1.5; echo ok", run_in_background: true, timeout: 1, notify: "silent" });
 		const id = taskId(r);

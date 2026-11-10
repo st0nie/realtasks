@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS, loadConfig, mergeConfig, resolveConfig } from "../src/config.ts";
-import { Notifier, type NoticeItem, terminalBlock } from "../src/notify.ts";
+import { COALESCE_MS, IDLE_RUNNING_COALESCE_MS, Notifier, type NoticeItem, terminalBlock } from "../src/notify.ts";
 import { commandFromBranch, recoverCommand, stashCommand } from "../src/rtk.ts";
 import { findKeyConflict } from "../src/commands.ts";
 import { formatLineRange, parseLineRange } from "../src/output.ts";
@@ -215,25 +215,50 @@ describe("notification format", () => {
 	});
 });
 
-function makeNotifier(mode: "tui" | "print" = "tui", busy = false) {
+function makeNotifier(mode: "tui" | "print" = "tui", initialBusy = false, initialRunningWake = false) {
+	let busy = initialBusy;
+	let runningWake = initialRunningWake;
 	const sent: Array<{ content: string; opts: unknown }> = [];
+	const toasts: string[] = [];
 	const notified = new Set<string>();
-	const timers: Array<() => void> = [];
+	const timers = new Map<number, { fn: () => void; ms: number }>();
+	let nextId = 1;
 	const n = new Notifier({
 		send: (content, _d, opts) => sent.push({ content, opts }),
-		toast: () => {},
+		toast: (msg) => toasts.push(msg),
 		mode: () => mode,
 		isBusy: () => busy,
+		hasRunningWake: () => runningWake,
 		isNotified: (id) => notified.has(id),
 		markNotified: (id) => notified.add(id),
-		setTimer: (fn) => {
-			timers.push(fn);
-			return timers.length;
+		setTimer: (fn, ms) => {
+			const id = nextId++;
+			timers.set(id, { fn, ms });
+			return id;
 		},
-		clearTimer: () => {},
+		clearTimer: (id) => {
+			timers.delete(id as number);
+		},
 	});
-	const fire = () => timers.splice(0).forEach((f) => f());
-	return { n, sent, notified, fire };
+	const fire = () => {
+		const fns = [...timers.values()].map((t) => t.fn);
+		timers.clear();
+		for (const f of fns) f();
+	};
+	return {
+		n,
+		sent,
+		toasts,
+		notified,
+		timers,
+		fire,
+		setBusy: (b: boolean) => {
+			busy = b;
+		},
+		setRunningWake: (r: boolean) => {
+			runningWake = r;
+		},
+	};
 }
 
 const item = (id: string, policy: NoticeItem["policy"] = "wake"): NoticeItem => ({
@@ -270,14 +295,66 @@ describe("notifier latch", () => {
 		fire();
 		expect(sent.length).toBe(1);
 	});
-	test("delivery map: streaming wake steers, passive is next turn", () => {
-		const { n, sent, fire } = makeNotifier("tui", true);
-		n.queue(item("a", "wake"));
+	test("delivery map: busy holds wake across multiple timers for boundary, passive is nextTurn", () => {
+		const { n, sent, toasts, notified, fire } = makeNotifier("tui", true);
+		n.queue(item("a1", "wake"));
+		fire(); // first 300ms window expires mid-turn
+		n.queue(item("a2", "wake"));
 		n.queue(item("b", "passive"));
 		n.queue(item("s", "silent"));
-		fire();
-		expect(sent.map((s) => s.opts)).toEqual([{ deliverAs: "steer" }, { deliverAs: "nextTurn" }]);
+		fire(); // second 300ms window expires mid-turn
+		// Passive goes to nextTurn; wake items are held (not steered one-by-one)
+		expect(sent.map((s) => s.opts)).toEqual([{ deliverAs: "nextTurn" }]);
 		expect(sent.some((s) => s.content.includes('id="s"'))).toBe(false);
+		expect(toasts).toEqual(["s", "b"]);
+		expect(notified.has("a1")).toBe(false);
+		expect(notified.has("a2")).toBe(false);
+		// At turn_end / settle boundary, both wake items arrive together in one message
+		const msg = n.takeForSettle();
+		expect(msg?.content).toContain('id="a1"');
+		expect(msg?.content).toContain('id="a2"');
+		expect(msg?.details.items.map((i) => i.id)).toEqual(["a1", "a2"]);
+		expect(notified.has("a1")).toBe(true);
+		expect(notified.has("a2")).toBe(true);
+		expect(toasts).toEqual(["s", "b", "a1", "a2"]);
+		expect(n.takeForSettle()).toBeUndefined();
+	});
+	test("busy wake item read during the turn before boundary is suppressed", () => {
+		const { n, notified, fire } = makeNotifier("tui", true);
+		n.queue(item("a", "wake"));
+		fire(); // moved to held mid-turn
+		n.queue(item("b", "wake"));
+		notified.add("a"); // agent read "a" via task_output during the same turn
+		const msg = n.takeForSettle();
+		expect(msg?.content).not.toContain('id="a"');
+		expect(msg?.content).toContain('id="b"');
+	});
+	test("held wake items flush with triggerTurn once session settles idle after abort", () => {
+		const { n, sent, setBusy, fire } = makeNotifier("tui", true);
+		n.queue(item("a", "wake"));
+		fire();
+		n.queue(item("b", "wake"));
+		fire();
+		expect(sent.length).toBe(0);
+		setBusy(false);
+		n.flush();
+		expect(sent.length).toBe(1);
+		expect(sent[0].opts).toEqual({ triggerTurn: true });
+		expect(sent[0].content).toContain('id="a"');
+		expect(sent[0].content).toContain('id="b"');
+	});
+	test("adaptive idle coalescing: widens window while sibling wake runs, shortens when last finishes", () => {
+		const { n, sent, timers, setRunningWake, fire } = makeNotifier("tui", false, true);
+		n.queue(item("a", "wake"));
+		expect([...timers.values()].map((t) => t.ms)).toEqual([IDLE_RUNNING_COALESCE_MS]);
+		// Last running wake task finishes: timer shortens to COALESCE_MS
+		setRunningWake(false);
+		n.queue(item("b", "wake"));
+		expect([...timers.values()].map((t) => t.ms)).toEqual([COALESCE_MS]);
+		fire();
+		expect(sent.length).toBe(1);
+		expect(sent[0].content).toContain('id="a"');
+		expect(sent[0].content).toContain('id="b"');
 	});
 	test("print mode holds wake for settle, drops passive", () => {
 		const { n, sent, notified, fire } = makeNotifier("print");

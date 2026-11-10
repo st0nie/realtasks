@@ -69,10 +69,21 @@ export class TaskManager {
 		this.cfg = cfg;
 		this.events = events;
 		this.notifier = new Notifier({
+			hasRunningWake: () => this.hasRunningWake(),
 			...notifierDeps,
 			isNotified: (id) => this.tasks.get(id)?.rec.notified ?? true,
 			markNotified: (id) => this.markNotified(id),
 		});
+	}
+
+	/** True while at least one background shell task with `notify: "wake"` is still running. */
+	hasRunningWake(): boolean {
+		for (const t of this.tasks.values()) {
+			if (t.running && t.rec.kind === "shell" && !t.rec.foreground && !t.rec.userStarted && t.rec.notify === "wake") {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	// ── lifecycle ───────────────────────────────────────────────

@@ -107,7 +107,31 @@ export default function realtasks(pi: ExtensionAPI): void {
 		rt.busy = false;
 	});
 
-	// Wake notifications that would otherwise miss the run, and print-mode holding.
+	pi.on("agent_settled", (_event, ctx) => {
+		rt.ctx = ctx;
+		rt.busy = false;
+		const headless = ctx.mode === "print" || ctx.mode === "json";
+		if (!headless) rt.manager.notifier.flush();
+	});
+
+	// Deliver all wake notifications accumulated during the turn as one combined
+	// message at the turn boundary (after any tool call in this turn has had a
+	// chance to read task output and flip the notified latch).
+	pi.on("turn_end", (event, ctx) => {
+		rt.ctx = ctx;
+		if (event.outcome === "aborted" || event.outcome === "error") return undefined;
+		const msg = rt.manager.notifier.takeForSettle();
+		if (!msg) return undefined;
+		return {
+			entries: [
+				...event.entries,
+				{ type: "custom_message", customType: NOTIFICATION_TYPE, content: msg.content, display: true, details: msg.details },
+			],
+			continue: true,
+		};
+	});
+
+	// Wake notifications that arrived after turn_end, and print-mode holding.
 	pi.on("agent_before_settle", async (event, ctx) => {
 		rt.ctx = ctx;
 		const headless = ctx.mode === "print" || ctx.mode === "json";
@@ -120,7 +144,6 @@ export default function realtasks(pi: ExtensionAPI): void {
 				rt.manager.notifier.flush();
 			}
 		}
-		rt.manager.notifier.flush();
 		const msg = rt.manager.notifier.takeForSettle();
 		if (!msg) return undefined;
 		rt.settleContinued = true;
