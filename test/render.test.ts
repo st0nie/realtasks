@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { registerShortcuts } from "../src/commands.ts";
 import { resolveConfig } from "../src/config.ts";
 import { Runtime } from "../src/runtime.ts";
-import { backgroundHint, foregroundWindowMs } from "../src/tools/bash.ts";
+import { backgroundHint, foregroundWindowMs, registerBash } from "../src/tools/bash.ts";
 import { humanMs, inputPreview, statusRow, waitLine } from "../src/tools/render.ts";
 
 const th = { fg: (_c: string, s: string) => s, bold: (s: string) => s } as unknown as Theme;
@@ -68,5 +68,33 @@ describe("foreground bash hint and window", () => {
 		const clash = mk("ctrl+b");
 		expect(registerShortcuts(clash.pi, clash, { "tui.editor.cursorLeft": ["ctrl+b"] })[0]).toContain("not registered");
 		expect(clash.backgroundKey).toBeUndefined();
+	});
+	test("renderResult computes hint from context.state.startedAt and windowMs on partial results", () => {
+		initTheme();
+		let registered: { renderResult?: (...args: never[]) => { render(w: number): string[] } } | undefined;
+		const rt = new Runtime({
+			registerTool: (def: never) => {
+				registered = def;
+			},
+		} as never);
+		rt.backgroundKey = "ctrl+shift+b";
+		registerBash(rt);
+		const render = registered?.renderResult;
+		expect(render).toBeDefined();
+		const state: { startedAt?: number; interval?: ReturnType<typeof setInterval> } = {
+			startedAt: Date.now() - 12_000,
+		};
+		try {
+			const c = render!(
+				{ content: [], details: { windowMs: 120_000 } } as never,
+				{ expanded: false, isPartial: true } as never,
+				th as never,
+				{ state, showImages: false, isError: false, executionStarted: true, invalidate: () => {} } as never,
+			);
+			const out = c.render(120).join("\n");
+			expect(out).toContain("ctrl+shift+b to background · auto in 1m48s");
+		} finally {
+			if (state.interval) clearInterval(state.interval);
+		}
 	});
 });

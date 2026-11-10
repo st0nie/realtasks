@@ -52,6 +52,26 @@ describe("bash override", () => {
 		expect(text(list)).toBe("No tasks.");
 	});
 
+	test("foreground bash emits onUpdate once initially and only when output changes", async () => {
+		const tool = env.tools.get("bash");
+		if (!tool) throw new Error("no bash tool");
+		const updates: Res[] = [];
+		const r = (await tool.execute(
+			"call-upd",
+			{ command: "echo line1; sleep 0.7; echo line2" },
+			undefined,
+			(u: unknown) => updates.push(u as Res),
+			env.ctx,
+		)) as Res;
+		expect(r.isError).toBeFalsy();
+		// 1 initial empty update + at most 2 output updates (line1, then line1\nline2), not 250ms ticks.
+		expect(updates.length).toBeGreaterThanOrEqual(2);
+		expect(updates.length).toBeLessThanOrEqual(3);
+		expect(updates[0].content).toEqual([]);
+		expect(updates[0].details).toMatchObject({ windowMs: 1000 });
+		expect(text(updates[updates.length - 1])).toContain("line1");
+	});
+
 	test("non-zero exit is an error result with the code", async () => {
 		const r = await env.call("bash", { command: "echo out; exit 3" });
 		expect(r.isError).toBe(true);

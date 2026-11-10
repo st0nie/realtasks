@@ -11,7 +11,7 @@ import { formatForModel, readRange } from "../output.ts";
 import { recoverCommand } from "../rtk.ts";
 import type { Runtime } from "../runtime.ts";
 import type { Task } from "../task.ts";
-import { cleanOutput, formatDuration, lastLines } from "../text.ts";
+import { cleanOutput, lastLines } from "../text.ts";
 import type { ReadySpec } from "../types.ts";
 import { Container, Text } from "@earendil-works/pi-tui";
 import { humanMs } from "./render.ts";
@@ -78,7 +78,9 @@ export interface BashDetails extends BashToolDetails {
 	requested?: string;
 	executed?: string;
 	status?: string;
-	/** Dim hint for the running row (partial results only; never sent to the model). */
+	/** Foreground window in ms (partial results only; used to render the live countdown hint). */
+	windowMs?: number;
+	/** Fallback hint when ToolRenderContext has no startedAt. */
 	hint?: string;
 }
 
@@ -136,9 +138,15 @@ export function registerBash(rt: Runtime): void {
 			// Pi's bash always defines it; fall back to plain text rather than assert.
 			if (!base) return new Text(result.content.map((p) => (p.type === "text" ? p.text : "")).join(""), 0, 0);
 			const c = base(result as AgentToolResult<BashToolDetails | undefined>, options, theme, context);
-			const hint = (result.details as BashDetails | undefined)?.hint;
-			// Pi's renderer clears and rebuilds the container each call, so the hint never stacks.
-			if (options.isPartial && hint && c instanceof Container) c.addChild(new Text(`\n${theme.fg("dim", hint)}`, 0, 0));
+			if (options.isPartial && c instanceof Container) {
+				const d = result.details as BashDetails | undefined;
+				const startedAt = (context.state as { startedAt?: number } | undefined)?.startedAt;
+				const hint =
+					d?.windowMs !== undefined && startedAt !== undefined
+						? backgroundHint(rt.backgroundKey, Date.now() - startedAt, d.windowMs)
+						: d?.hint;
+				if (hint) c.addChild(new Text(`\n${theme.fg("dim", hint)}`, 0, 0));
+			}
 			return c;
 		},
 		async execute(toolCallId, rawParams, signal, onUpdate, ctx): Promise<Result> {
@@ -308,13 +316,16 @@ async function runForeground(
 	else signal?.addEventListener("abort", onAbort, { once: true });
 
 	const windowTimer = setTimeout(() => promote("timeout"), windowMs);
+	let lastTail = "";
+	if (onUpdate) {
+		onUpdate({ content: [], details: { ...details, windowMs } });
+	}
 	const updater = onUpdate
 		? setInterval(() => {
-				const elapsed = Date.now() - started;
 				const tail = lastLines(cleanOutput(task.ring.recent()), 8);
-				const head = `${cmdLine(task.rec.requested, task.rec.executed)} · ${formatDuration(elapsed)}`;
-				const hint = backgroundHint(rt.backgroundKey, elapsed, windowMs);
-				onUpdate({ content: [text(tail)], details: { ...details, status: head, hint } });
+				if (tail === lastTail) return;
+				lastTail = tail;
+				onUpdate({ content: [text(tail)], details: { ...details, windowMs } });
 			}, UPDATE_MS)
 		: undefined;
 
