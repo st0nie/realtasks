@@ -20,8 +20,12 @@ export class Runtime {
 	busy = false;
 	/** Wake continuation was requested once this settle; reset on agent_start. */
 	settleContinued = false;
-	/** The background shortcut, only once it was actually registered (TUI, not off, no clash). */
+	/** The background shortcut, only once it is active (TUI, not off, no clash). */
 	backgroundKey: string | undefined;
+	/** The background key is an editor key: it acts through the input listener, only on an empty input. */
+	backgroundGated = false;
+	/** The /tasks overlay has focus. */
+	managerOpen = false;
 	private listeners = new Set<() => void>();
 
 	constructor(pi: ExtensionAPI) {

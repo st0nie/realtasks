@@ -63,12 +63,26 @@ Output goes to `~/.pi/agent/tasks/<session>/<id>.log`. Logs rotate at 50 MB and 
   ```
 
   Finished rows stay for 10 s. The status line shows the running count and unread finished counts (`✱2 ✓1 ✗1`).
-- `ctrl+shift+b` or `/bg` sends running foreground commands to the background. A running `bash` row shows `ctrl+shift+b to background · auto in 1m48s`. A message you type meanwhile is queued, as in Claude Code, and does not touch the command.
-- `shift+down` or `/tasks` opens the manager. Its keys are `k` stop, `i` input, `r` restart, `c` copy log path, `x` clear finished, and `enter` follow.
+- `ctrl+b` on an empty input, or `/bg`, sends running foreground commands to the background. A running `bash` row shows `ctrl+b to background · auto in 1m48s`. With text in the input, or with nothing running, `ctrl+b` stays Pi's cursor-left. A message you type meanwhile is queued, as in Claude Code, and does not touch the command.
+- `shift+down` or `/tasks` opens the manager. It has the task list on the left and the selected task's log on the right:
+
+  | Key | Action |
+  | --- | --- |
+  | `↑` `↓` | Select a task |
+  | `shift+↑` `shift+↓` | Scroll the log one line |
+  | `pgup` `pgdn` | Scroll one page |
+  | `ctrl+u` `ctrl+d` | Scroll half a page |
+  | `home` or `g`, `end` or `G` | Jump to the start or the end of the log |
+  | `enter` | Pause or resume following the output |
+  | `k` `i` `r` | Stop the task, send it input, restart it |
+  | `c` `x` | Copy the log path, clear finished tasks |
+  | `esc` or `q` | Close |
+
+  Scrolling up pauses the view, so it holds still while the task keeps writing; scrolling back to the end follows the output again. In Pi's fullscreen mode the mouse wheel scrolls the log, or moves the selection over the list, and a click selects a task.
 - `/bg <cmd>` starts a task yourself. Its completion never wakes the agent.
 - `/tasks stop <id|all>` stops tasks. `/tasks clear` removes finished tasks the agent has already seen; `/tasks clear all` removes every finished task. `/tasks log <id>` shows a task's log path and last 20 lines.
 
-Shortcuts never take a key Pi already binds (`ctrl+b`, for example, is cursor-left). A conflicting setting is skipped with a warning. `ctrl+shift+b` needs a terminal with the kitty keyboard protocol; elsewhere it arrives as `ctrl+b`, so remap it or use `/bg`.
+Shortcuts never take over a key Pi already binds. `ctrl+b` is Pi's cursor-left, so realtasks shares it instead: it acts only when the input is empty and a foreground command is running. Any other setting that clashes with a Pi binding is skipped with a warning; a key Pi does not bind works whatever the input holds.
 
 ## Configuration
 
@@ -85,7 +99,7 @@ Config lives in `~/.pi/agent/realtasks/config.json` (optional; missing means def
   "defaultNotify": "wake",
   "printModeMaxWaitMs": 600000,
   "rtkPassthroughFor": ["ready", "tty"],
-  "shortcuts": { "background": "ctrl+shift+b", "manager": "shift+down" }
+  "shortcuts": { "background": "ctrl+b", "manager": "shift+down" }
 }
 ```
 

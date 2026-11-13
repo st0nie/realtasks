@@ -37,7 +37,7 @@ export const DEFAULTS: TasksConfig = {
 	defaultNotify: "wake",
 	printModeMaxWaitMs: 600_000,
 	rtkPassthroughFor: ["ready", "tty"],
-	shortcuts: { background: "ctrl+shift+b", manager: "shift+down" },
+	shortcuts: { background: "ctrl+b", manager: "shift+down" },
 	dir: "",
 };
 

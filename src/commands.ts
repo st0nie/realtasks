@@ -1,7 +1,7 @@
 // Slash commands (/bg, /tasks) and shortcuts.
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, type KeyId } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, TerminalInputHandler } from "@earendil-works/pi-coding-agent";
+import { getKeybindings, isKeyRelease, matchesKey, type KeyId } from "@earendil-works/pi-tui";
 import type { Runtime } from "./runtime.ts";
 import type { Task } from "./task.ts";
 import { readTail } from "./output.ts";
@@ -38,10 +38,16 @@ export async function openManager(rt: Runtime, ctx: ExtensionContext): Promise<v
 		ctx.ui.notify(rt.manager.list().map((t) => `${t.rec.id} ${t.rec.status} ${t.rec.label}`).join("\n") || "No tasks.", "info");
 		return;
 	}
-	const action = await ctx.ui.custom<ManagerAction>(
-		(tui, theme, _kb, done) => new TasksOverlay(rt, tui, theme, done),
-		{ overlay: true, overlayOptions: { width: "90%", maxHeight: "90%", anchor: "center" } },
-	);
+	let action: ManagerAction;
+	rt.managerOpen = true;
+	try {
+		action = await ctx.ui.custom<ManagerAction>(
+			(tui, theme, kb, done) => new TasksOverlay(rt, tui, theme, kb, done),
+			{ overlay: true, overlayOptions: { width: "90%", maxHeight: "90%", anchor: "center" } },
+		);
+	} finally {
+		rt.managerOpen = false;
+	}
 	if (!action) return;
 	const t = rt.manager.get(action.id);
 	if (!t) return;
@@ -127,16 +133,12 @@ export function registerCommands(pi: ExtensionAPI, rt: Runtime): void {
 
 type ResolvedBindings = Record<string, KeyId | KeyId[] | undefined>;
 
-/** Pi action already bound to `key` (defaults merged with keybindings.json), if any. */
-export function findKeyConflict(key: string, resolved: ResolvedBindings): string | undefined {
+/** Pi actions already bound to `key` (defaults merged with keybindings.json). */
+export function findKeyConflicts(key: string, resolved: ResolvedBindings): string[] {
 	const k = key.toLowerCase();
-	for (const [action, keys] of Object.entries(resolved)) {
-		let list: KeyId[] = [];
-		if (Array.isArray(keys)) list = keys;
-		else if (keys) list = [keys];
-		if (list.some((x) => x.toLowerCase() === k)) return action;
-	}
-	return undefined;
+	return Object.entries(resolved)
+		.filter(([, keys]) => [keys].flat().some((x) => x?.toLowerCase() === k))
+		.map(([action]) => action);
 }
 
 /**
@@ -154,18 +156,25 @@ export function piBindings(): ResolvedBindings {
 
 /**
  * Called from session_start (Pi reads extension shortcuts right after it), so
- * remapping takes effect on /reload. "off" disables a binding; a key Pi
- * already uses is skipped with a warning.
+ * remapping takes effect on /reload. "off" disables a binding. A background key
+ * that Pi binds only to editor actions (ctrl+b is cursor-left) is not registered:
+ * it is shared through backgroundInput(). Any other key Pi already uses is
+ * skipped with a warning.
  */
 export function registerShortcuts(pi: ExtensionAPI, rt: Runtime, resolved: ResolvedBindings = piBindings()): string[] {
 	const warnings: string[] = [];
 	const bind = (setting: "background" | "manager", description: string, run: (ctx: ExtensionContext) => void) => {
 		const key = rt.cfg.shortcuts[setting];
 		if (key === "off") return;
-		const clash = findKeyConflict(key, resolved);
-		if (clash) {
+		const clashes = findKeyConflicts(key, resolved);
+		if (setting === "background" && clashes.length > 0 && clashes.every((a) => a.startsWith("tui.editor."))) {
+			rt.backgroundKey = key;
+			rt.backgroundGated = true;
+			return;
+		}
+		if (clashes.length > 0) {
 			warnings.push(
-				`realtasks: shortcut ${key} is Pi's ${clash}; not registered. Set shortcuts.${setting} in realtasks/config.json to another key or "off".`,
+				`realtasks: shortcut ${key} is Pi's ${clashes[0]}; not registered. Set shortcuts.${setting} in realtasks/config.json to another key or "off".`,
 			);
 			return;
 		}
@@ -180,4 +189,20 @@ export function registerShortcuts(pi: ExtensionAPI, rt: Runtime, resolved: Resol
 	bind("background", "Background running foreground commands (realtasks)", (ctx) => promoteShortcut(rt, ctx));
 	bind("manager", "Open the task manager (realtasks)", (ctx) => void openManager(rt, ctx));
 	return warnings;
+}
+
+/**
+ * Raw input listener that shares an editor key with the background action. It
+ * takes the key only on an empty input, while a foreground command runs and the
+ * manager is closed; otherwise the key goes on to the editor.
+ */
+export function backgroundInput(rt: Runtime, ctx: ExtensionContext, key: string): TerminalInputHandler {
+	const id = key.toLowerCase() as KeyId;
+	return (data) => {
+		if (rt.foreground.size === 0 || rt.managerOpen) return undefined;
+		if (isKeyRelease(data) || !matchesKey(data, id)) return undefined;
+		if (ctx.ui.getEditorText().length > 0) return undefined;
+		promoteShortcut(rt, ctx);
+		return { consume: true };
+	};
 }

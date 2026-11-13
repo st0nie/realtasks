@@ -42,7 +42,7 @@ bash(command) ── spawn detached, output → <id>.log
    │
    └─ await exit, up to timeout (default 120 s, max 600 s)
         ├─ exits in window ────────────────────────────► normal bash result, no task
-        └─ still running / ctrl+shift+b ───────────────► promoted to task (return id + tail)
+        └─ still running / ctrl+b ─────────────────────► promoted to task (return id + tail)
 ```
 
 Promotion moves nothing: the process was already detached and writing to its log, so `bash` simply stops awaiting it and returns the task id.
@@ -193,7 +193,7 @@ Every task runs detached in its own process group with output going straight to 
 ### Stopping
 
 - `SIGTERM` to the process group (`process.kill(-pgid)`), then `SIGKILL` after `grace_ms`. Windows: forced `taskkill` of every process carrying the task's `PI_TASK_ID`, at once (see Windows).
-- Esc during a foreground `bash` kills it (user cancel). Ctrl+Shift+B or the `timeout` window ending promote it instead. A message typed meanwhile is queued by Pi and leaves the command alone; it reaches the model when the call returns. Same split as Claude Code.
+- Esc during a foreground `bash` kills it (user cancel). Ctrl+B on an empty input or the `timeout` window ending promote it instead. A message typed meanwhile is queued by Pi and leaves the command alone; it reaches the model when the call returns. Same split as Claude Code.
 - `bash` never kills on time. Only a monitor's `timeout_ms` ends a task as `timed_out`.
 
 **Readiness** (`ready` on `bash`)
@@ -270,7 +270,7 @@ Step 2 needs a spike to confirm the assistant message is on the branch before to
 
 The user sees what is running at a glance and can take over any task without asking the agent.
 
-- **Foreground `bash` rendering**: live tail via `onUpdate` (last 8 lines, emitted only when output changes) and Pi's own 1 s `Elapsed` timer. After 2 s a dim hint line appears inside that `bash` row only while it is running: `ctrl+shift+b to background · auto in 1m48s` (the countdown to the `timeout` window end, computed in `renderResult` on each 1 s redraw). The key is shown only if the background shortcut was actually registered (not `off`, no clash, TUI); otherwise the line is just `backgrounds in 1m48s`. The hint is rendered only for partial tool results, so it disappears with the final result; realtasks sets no editor widget for it. Shows `requested → executed` when the rtk hook rewrote the command.
+- **Foreground `bash` rendering**: live tail via `onUpdate` (last 8 lines, emitted only when output changes) and Pi's own 1 s `Elapsed` timer. After 2 s a dim hint line appears inside that `bash` row only while it is running: `ctrl+b to background · auto in 1m48s` (the countdown to the `timeout` window end, computed in `renderResult` on each 1 s redraw). The key is shown only if the background shortcut was actually registered (not `off`, no clash, TUI); otherwise the line is just `backgrounds in 1m48s`. The hint is rendered only for partial tool results, so it disappears with the final result; realtasks sets no editor widget for it. Shows `requested → executed` when the rtk hook rewrote the command.
 - **Task tool rendering** (`renderCall`/`renderResult` on `task_output`, `task_wait`, `task_input`, `task_stop`, `monitor`): calls name the task by label, never by bare id, and show durations in human units, never raw milliseconds. Examples: `task_output npm test (b7f3k9a2) · peek`, `task_output npm test (b7f3k9a2) · lines 120-260 · grep /error/`, `task_wait npm test (b7f3k9a2) · up to 10m · until /ready/`, `task_input python REPL (bdw9czz1) · "print(2+2)⏎"`, `task_stop dev server (bgkrw0t2)`, `task_stop all running tasks`. A `task_wait` on several tasks names each of them, separated by commas. An unknown id falls back to the id alone. A collapsed `task_output` result is one status row (`· npm test running`); expanded, it shows the output. While `task_wait` waits, its row shows a live line (the renderer redraws it every 120 ms with its own timer, the same frame rate as the dock, and computes the elapsed time from the wait's start timestamp; output updates arrive through `onUpdate` at most once a second), `✱ waiting for npm test · 1m12s of 10m │ test 31 ok`, with the spinner, the task labels, the elapsed wait, the cap, and the latest output line of the first task still running (sent through `onUpdate`, so it is visible but costs no model tokens). When it returns, the row shows why, naming the task the wait ended on: `✓ npm test completed exit 0 · waited 1m14s`, `✓ dev server output matched · waited 3s`, `still running · waited 10m (timeout)`, or `wait cancelled · 4s`.
 - **Dock** (`ctx.ui.setWidget`, above the editor), drawn as a tree in the style of rpiv-todo and Claude Code's background tasks:
 
@@ -282,21 +282,56 @@ The user sees what is running at a glance and can take over any task without ask
   ```
 
   The heading is `●` in the accent color while anything runs, `○` dim otherwise. Each row has a status glyph, the id (dim), the label, the elapsed or total time, and for running tasks the latest output line after a dim `│`. Running shell and PTY tasks show an animated star spinner in the style of Claude Code (`·✢✱✶✻✽` played forward then back, one frame per 120 ms). Every frame is a text-only glyph: Claude Code's `✳` (U+2733) is an emoji character, and terminals that fall back to a color emoji font (Windows Terminal, some Linux setups) draw it as a double-width color emoji that also overwrites the next cell; `✱` (U+2731) takes its place. It is deliberately not Pi's braille spinner, so task activity looks different from Pi's own "Working" indicator. Running monitors pulse between `◉` and `◎`. Finished tasks stay for 10 s after they end with `✓` (completed), `✗` (failed, timed out), `■` (stopped) or `?` (lost), then drop out. At most 5 task rows; the rest collapse into `└─ +N more · /tasks`. The last row uses `└─`, and one blank line follows the panel so it does not touch the editor. The dock is hidden when nothing is running or lingering, and the animation timer runs only while the dock is shown. The status line carries the spinner frame and the running count (`✱ 2`) plus `✓ 2 ✗ 1` counts for unread finished tasks; every glyph is followed by one space before its count, so wide-rendering frames (`✶✻✽`) never touch the digit.
-- **`/tasks` manager** (`ctx.ui.custom` overlay): list on the left, live log on the right. Keys: `↑↓` select, `enter` toggle follow, `pgup`/`pgdn` scroll, `k` stop, `i` send input (prompts for text, C escapes decoded), `r` restart with the same command, `c` copy log path, `x` clear finished, `esc` close. Restart stops the task if it is running, then starts a new user task (as `/bg <cmd>`) with the same executed command, cwd, `tty` and `stdin`; the new task gets a new id. Opening the manager marks finished tasks as seen by the user (clears the `✓`/`✗` status counts) without touching the agent's `notified` latch.
+- **`/tasks` manager** (`ctx.ui.custom` overlay): task list on the left, the selected task's log on the right.
+
+  | Key | Action |
+  | --- | --- |
+  | `↑` `↓` | Select a task (`tui.select.up`/`down`) |
+  | `shift+↑` `shift+↓` | Scroll the log one line (also `tui.altScreen.lineUp`/`lineDown`) |
+  | `pgup` `pgdn` | Scroll the log one page (`tui.select.pageUp`/`pageDown`, `tui.altScreen.pageUp`/`pageDown`) |
+  | `ctrl+u` `ctrl+d` | Scroll the log half a page (also `tui.altScreen.halfPageUp`/`halfPageDown`) |
+  | `home` or `g`, `end` or `G` | Jump to the start or the end of the log (also `tui.altScreen.top`/`bottom`) |
+  | `enter` | Toggle follow (`tui.select.confirm`) |
+  | `k` | Stop the task |
+  | `i` | Send input (prompts for text, C escapes decoded) |
+  | `r` | Restart with the same command |
+  | `c` | Copy the log path |
+  | `x` | Clear finished tasks |
+  | `esc` or `q` | Close (`tui.select.cancel`) |
+  | Mouse wheel | Over the log: scroll it. Over the list: move the selection. Fullscreen mode only |
+  | Left click on a task row | Select that task. Fullscreen mode only |
+
+  Named actions are looked up in Pi's keybindings, so a user remap in `keybindings.json` applies here too. Pi delivers extension shortcuts through the editor, so the manager shortcut does nothing while the overlay has focus.
+
+  **Follow and pause.** The log view starts in follow mode: it shows the end of the log and moves as output arrives. Scrolling up, or `enter`, pauses it. A paused view is a snapshot of the log taken at that moment, so it holds still while the task keeps writing (the in-memory ring drops old output, so line positions in the live log are not stable). Scrolling down to the end of the snapshot, `end`, or `enter` resumes follow and shows the live end again. Scroll positions are clamped to the log, so no key press is wasted past either end. Selecting another task resumes follow. The title row shows the state on the right: `following`, or `paused · lines 120-146 of 300`.
+
+  The view covers what the manager keeps of a log: the last 64 KB, from the in-memory ring for a running task and from the log file for a finished one. Lines longer than the pane are truncated; the full output is in the log file (`c` copies its path).
+
+  **Layout.** The task list scrolls with the selection, so the selected row is always visible when there are more tasks than rows. The selection is kept by task id: it stays on its task when another task starts or finished ones are cleared. Pi clips an overlay to its `maxHeight` (90% of the terminal rows), so the body takes `floor(rows × 0.9) − 4` rows, between 6 and 30; the footer and the bottom border are then always drawn. The footer lists the keys, in a shorter form when the full one does not fit, and shows the result of the last action (`Stopping b7f3k9a2…`, `Log path copied`) until the next key.
+
+  Restart stops the task if it is running, then starts a new user task (as `/bg <cmd>`) with the same executed command, cwd, `tty` and `stdin`; the new task gets a new id. Opening the manager marks finished tasks as seen by the user (clears the `✓`/`✗` status counts) without touching the agent's `notified` latch.
 - **Typing during a foreground command**: no special handling. Pi queues the message and delivers it once the `bash` call returns (finished or promoted), the same as Claude Code. Use the background shortcut to free the turn sooner.
 
 | Shortcut / command | Action |
 | --- | --- |
-| `ctrl+shift+b` | Promote all running foreground commands to tasks |
+| `ctrl+b` with an empty input | Promote all running foreground commands to tasks |
 | `shift+down` | Open `/tasks` |
-| `/bg` | Same as `ctrl+shift+b` (for tmux without extended keys) |
+| `/bg` | Same as `ctrl+b`, whatever the input holds |
 | `/bg <cmd>` | User starts a task directly; output goes to the log, not the model context. Its completion is a UI toast only (`silent`), so it never wakes the agent |
 | `/tasks` | Open the manager |
 | `/tasks stop <id or all>` | Stop from the command line |
 | `/tasks clear [all]` | Remove finished tasks from the list, the dock and the status counts. Their logs stay on disk until the retention sweep. A finished task whose outcome the agent has not read yet is kept unless `all` is given (tasks the agent is never told about, `/bg <cmd>` tasks and `notify: "silent"` tasks, do not count as unread and are always cleared); `all` also marks those as read, so no notification for them is sent later. Running tasks are never touched (stop them first). Reports how many were cleared and how many unread ones were kept |
 | `/tasks log <id>` | Print the task's log path and its last 20 lines as a UI notice (no model context) |
 
-**No conflicts with Pi's keybindings.** realtasks never takes a key Pi binds by default (for example `ctrl+b` is cursor-left, `ctrl+shift+up`/`down` jump between prompts) or one the user bound in `keybindings.json`. The defaults `ctrl+shift+b` and `shift+down` are unbound in Pi. At load, each configured shortcut is checked against Pi's resolved keybindings (`getKeybindings().getResolvedBindings()`, which merges defaults and user bindings); a clashing shortcut is not registered and a warning names the Pi action it would shadow and the `shortcuts.*` key in `realtasks/config.json` to change. `/bg` and `/tasks` always remain available. Every shortcut is remappable in that config, and `off` disables it.
+**Sharing `ctrl+b` with the editor.** Pi binds `ctrl+b` to cursor-left (`tui.editor.cursorLeft`). A key registered with `registerShortcut` goes to the extension before the editor sees it, and the handler cannot decline it, so realtasks does not register `ctrl+b` as a shortcut. It installs a raw input listener instead (`ctx.ui.onTerminalInput`, on every `session_start` in the TUI). The listener consumes the key and promotes the foreground commands only when all of these hold: the input is empty, at least one foreground command is running, and the `/tasks` manager is closed. In every other case the key passes through untouched and stays cursor-left, which does nothing on an empty input. Key release events are ignored. The listener runs before Pi's focus dispatch, so the rule also applies while a Pi dialog has focus.
+
+**No other conflicts with Pi's keybindings.** realtasks never takes over a key Pi binds by default (for example `ctrl+shift+up`/`down` jump between prompts) or one the user bound in `keybindings.json`. At the first `session_start`, each configured shortcut is checked against Pi's resolved keybindings (`getKeybindings().getResolvedBindings()`, which merges defaults and user bindings):
+
+- A key Pi does not bind is registered with `registerShortcut` and works whatever the input holds. The default `shift+down` is such a key.
+- A background key whose every clashing action is an editor action (`tui.editor.*`) is shared through the input listener, as `ctrl+b` is.
+- Any other clash is not registered, and a warning names the Pi action it would shadow and the `shortcuts.*` key in `realtasks/config.json` to change. This covers the manager shortcut on any bound key and a background key on an app action.
+
+`/bg` and `/tasks` always remain available. Every shortcut is remappable in that config, and `off` disables it.
 
 Non-TUI modes: tools and notifications behave the same; dock, overlay and shortcuts are skipped (`ctx.mode !== "tui"`); RPC clients get notifications through `ctx.ui.notify` where supported.
 
@@ -315,7 +350,7 @@ All keys live in `<agentDir>/realtasks/config.json` (default `~/.pi/agent/realta
 | `defaultNotify` | `wake` | Policy when `bash` omits `notify` |
 | `printModeMaxWaitMs` | 600000 | How long print/JSON mode waits for `wake` tasks |
 | `rtkPassthroughFor` | `["ready", "tty"]` | Task features that run the original command instead of the rtk rewrite |
-| `shortcuts.background` | `ctrl+shift+b` | Promote shortcut; `off` disables |
+| `shortcuts.background` | `ctrl+b` | Promote shortcut; an editor key such as the default acts only on an empty input; `off` disables |
 | `shortcuts.manager` | `shift+down` | Manager shortcut; `off` disables |
 | `dir` | `<agentDir>/tasks` | Log and record root |
 
@@ -323,7 +358,7 @@ All keys live in `<agentDir>/realtasks/config.json` (default `~/.pi/agent/realta
 
 Ship the Claude Code core first; Codex-style interaction and durability follow once the core is stable.
 
-1. **v0.1 Core**: `bash` override with timeout promotion and `run_in_background`, `task_output`, `task_wait`, `task_stop`, `task_list`, exactly-once notifications, disk logs, dock, `ctrl+shift+b`, rtk contracts 1–5 with original-command recovery.
+1. **v0.1 Core**: `bash` override with timeout promotion and `run_in_background`, `task_output`, `task_wait`, `task_stop`, `task_list`, exactly-once notifications, disk logs, dock, `ctrl+b`, rtk contracts 1–5 with original-command recovery.
 2. **v0.2 Interaction**: `task_input`, `tty` via optional `@lydell/node-pty`, `ready`, stall detection, `/tasks` overlay.
 3. **v0.3 Durability**: re-adoption across `/reload`, `keep_alive`, print-mode settle handling, log retention.
 4. **v0.4 Streams**: `monitor` (command and file sources), event batching and flood stop.

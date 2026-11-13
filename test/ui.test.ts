@@ -3,9 +3,21 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { TaskManager } from "../src/manager.ts";
 import { Task } from "../src/task.ts";
 import type { TaskRecord } from "../src/types.ts";
-import type { Component } from "@earendil-works/pi-tui";
+import { KeybindingsManager, TUI_KEYBINDINGS, type Component } from "@earendil-works/pi-tui";
 import { NOTIFICATION_TYPE, type NotificationDetails, terminalBlock, terminalDetail, terminalLevel, terminalSummary } from "../src/notify.ts";
-import { dockLines, FRAME_MS, LINGER_MS, type NotificationMessage, renderNotification, SPINNER, spinnerFrame, statusCounts } from "../src/ui.ts";
+import { Runtime } from "../src/runtime.ts";
+import {
+	dockLines,
+	FRAME_MS,
+	LINGER_MS,
+	type ManagerAction,
+	type NotificationMessage,
+	renderNotification,
+	SPINNER,
+	spinnerFrame,
+	statusCounts,
+	TasksOverlay,
+} from "../src/ui.ts";
 import { testConfig, tmpDir } from "./helpers.ts";
 
 const th = { fg: (_c: string, s: string) => s, bold: (s: string) => s } as unknown as Theme;
@@ -126,6 +138,179 @@ describe("/tasks clear", () => {
 			expect(unread.rec.notified).toBe(true);
 		} finally {
 			cleanup();
+		}
+	});
+});
+
+describe("/tasks manager", () => {
+	const KEY = {
+		up: "\x1b[A",
+		down: "\x1b[B",
+		shiftUp: "\x1b[1;2A",
+		shiftDown: "\x1b[1;2B",
+		pageUp: "\x1b[5~",
+		pageDown: "\x1b[6~",
+		home: "\x1b[H",
+		enter: "\r",
+		ctrlD: "\x04",
+		esc: "\x1b",
+	};
+	const WIDTH = 100;
+	const numbered = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => `line ${from + i}\n`).join("");
+
+	/** Overlay over `tasks` in a terminal of `rows` rows; 30 rows leave 23 body rows and a 20-line log pane. */
+	function open(tasks: Task[], rows = 30) {
+		const rt = new Runtime({} as never);
+		for (const t of tasks) rt.manager.tasks.set(t.rec.id, t);
+		const closed: ManagerAction[] = [];
+		const tui = { requestRender: () => {}, terminal: { rows } };
+		const overlay = new TasksOverlay(rt, tui as never, th, new KeybindingsManager(TUI_KEYBINDINGS), (a) => closed.push(a));
+		const body = () => overlay.render(WIDTH).slice(2, -2);
+		return {
+			rt,
+			overlay,
+			closed,
+			press: (...keys: string[]) => keys.forEach((k) => overlay.handleInput(k)),
+			title: () => overlay.render(WIDTH)[1],
+			/** Log lines shown, below the three task header rows. */
+			log: () =>
+				body()
+					.slice(3)
+					.map((l) => l.split("│")[2].trim())
+					.filter(Boolean),
+			list: () => body().map((l) => l.split("│")[1].trim()),
+			mouse: (type: "wheel" | "click", x: number, y: number, wheelDelta?: number) =>
+				overlay.handleMouse({ type, button: type === "click" ? "left" : "none", x, y, screenX: x, screenY: y, width: WIDTH, height: 27, shift: false, alt: false, ctrl: false, wheelDelta }),
+		};
+	}
+
+	test("frame, footer included, fits in the 90% of the terminal Pi leaves an overlay", () => {
+		for (const rows of [20, 24, 30, 35, 50]) {
+			const m = open([task("brun0001")], rows);
+			const lines = m.overlay.render(WIDTH);
+			expect(lines.length).toBeLessThanOrEqual(Math.floor(rows * 0.9));
+			expect(lines.at(-1)).toMatch(/^╰─+╯$/);
+			expect(lines.at(-2)).toContain("pg scroll");
+			m.overlay.dispose();
+		}
+		const wide = open([task("brun0001")]);
+		expect(wide.overlay.render(140).at(-2)).toContain("shift+↑↓ pgup pgdn scroll · enter follow");
+		wide.overlay.dispose();
+	});
+
+	test("log scrolling is clamped to the log; reaching the end resumes follow", () => {
+		const m = open([task("brun0001", {}, numbered(1, 100))]);
+		expect(m.title()).toContain("following");
+		expect(m.log()).toEqual(numbered(81, 100).trimEnd().split("\n"));
+
+		m.press(KEY.pageUp);
+		expect(m.title()).toContain("paused · lines 62-81 of 100");
+		// Far more presses than the log has pages stop at the first line.
+		m.press(...Array<string>(10).fill(KEY.pageUp));
+		expect(m.title()).toContain("lines 1-20 of 100");
+		m.press(KEY.pageDown);
+		expect(m.title()).toContain("lines 20-39 of 100");
+
+		m.press(KEY.home, KEY.shiftDown);
+		expect(m.title()).toContain("lines 2-21 of 100");
+		m.press(KEY.shiftUp, KEY.shiftUp, KEY.ctrlD);
+		expect(m.title()).toContain("lines 11-30 of 100");
+		m.press("g");
+		expect(m.log()[0]).toBe("line 1");
+
+		m.press("G");
+		expect(m.title()).toContain("following");
+		expect(m.log().at(-1)).toBe("line 100");
+		// Scrolling down at the end stays in follow mode.
+		m.press(KEY.pageDown, KEY.shiftDown);
+		expect(m.title()).toContain("following");
+		m.overlay.dispose();
+	});
+
+	test("a paused view holds still while the task writes; follow shows the live end", () => {
+		const t = task("brun0001", {}, numbered(1, 100));
+		const m = open([t]);
+		m.press(KEY.shiftUp);
+		t.ring.append(numbered(101, 150));
+		expect(m.title()).toContain("paused · lines 80-99 of 100");
+		m.press(KEY.shiftDown);
+		expect(m.title()).toContain("following");
+		expect(m.log().at(-1)).toBe("line 150");
+
+		// enter pauses in place, enter again resumes.
+		m.press(KEY.enter);
+		t.ring.append(numbered(151, 160));
+		expect(m.title()).toContain("paused · lines 131-150 of 150");
+		m.press(KEY.enter);
+		expect(m.log().at(-1)).toBe("line 160");
+
+		// A log shorter than the pane cannot scroll, but enter still pauses it.
+		const short = open([task("bshort01", {}, "only\n")]);
+		short.press(KEY.pageUp);
+		expect(short.title()).toContain("following");
+		short.press(KEY.enter);
+		expect(short.title()).toContain("paused · lines 1-1 of 1");
+		m.overlay.dispose();
+		short.overlay.dispose();
+	});
+
+	test("the list scrolls with the selection, which stays on its task when the list changes", () => {
+		const id = (i: number) => `b${String(i).padStart(7, "0")}`;
+		const m = open(Array.from({ length: 40 }, (_, i) => task(id(i), { startedAt: i }, `out ${i}\n`)));
+		const selected = () => m.list().filter((l) => l.startsWith("▶"));
+		// Newest first: row 0 is task 39.
+		expect(selected()).toHaveLength(1);
+		expect(selected()[0].endsWith(` ${id(39)} ${id(39)}`)).toBe(true);
+		expect(m.list()[0]).toBe(selected()[0]);
+
+		m.press(...Array<string>(30).fill(KEY.down));
+		expect(selected()[0]).toContain(id(9));
+		expect(m.list().at(-1)).toContain(id(9));
+		expect(m.log()).toEqual(["out 9"]);
+
+		// A task started meanwhile lands on top; the selection does not slide to its neighbour.
+		const added = task(id(99), { startedAt: 99 });
+		m.rt.manager.tasks.set(added.rec.id, added);
+		expect(selected()[0]).toContain(id(9));
+
+		m.press(...Array<string>(60).fill(KEY.up));
+		expect(selected()[0]).toContain(id(99));
+		expect(m.list()[0]).toContain(id(99));
+		m.press(...Array<string>(60).fill(KEY.down));
+		expect(selected()[0]).toContain(id(0));
+
+		// Selecting another task resumes follow.
+		m.press(KEY.enter, KEY.up);
+		expect(m.title()).toContain("following");
+		m.overlay.dispose();
+	});
+
+	test("mouse: wheel scrolls the log or moves the selection, a click selects a row", () => {
+		const m = open([task("bold0001", { startedAt: 1 }, numbered(1, 100)), task("bnew0001", { startedAt: 2 }, numbered(1, 100))]);
+		const selected = () => m.list().find((l) => l.startsWith("▶"));
+		m.overlay.render(WIDTH);
+		expect(m.mouse("wheel", 60, 10, -3)).toEqual({ handled: true });
+		expect(m.title()).toContain("paused · lines 78-97 of 100");
+		m.mouse("wheel", 60, 10, 50);
+		expect(m.title()).toContain("following");
+
+		expect(selected()).toContain("bnew0001");
+		m.mouse("wheel", 5, 10, 1);
+		expect(selected()).toContain("bold0001");
+		// Row 0 of the body is y = 2, below the border and the title.
+		expect(m.mouse("click", 5, 2)).toEqual({ handled: true });
+		expect(selected()).toContain("bnew0001");
+		// Empty rows and the log pane take no click.
+		expect(m.mouse("click", 5, 8)).toBeUndefined();
+		expect(m.mouse("click", 60, 2)).toBeUndefined();
+		m.overlay.dispose();
+	});
+
+	test("esc and q close", () => {
+		for (const key of [KEY.esc, "q"]) {
+			const m = open([task("brun0001")]);
+			m.press(key);
+			expect(m.closed).toEqual([undefined]);
 		}
 	});
 });

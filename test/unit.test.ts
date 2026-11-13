@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DEFAULTS, loadConfig, mergeConfig, resolveConfig } from "../src/config.ts";
 import { COALESCE_MS, IDLE_RUNNING_COALESCE_MS, Notifier, type NoticeItem, terminalBlock } from "../src/notify.ts";
 import { commandFromBranch, recoverCommand, stashCommand } from "../src/rtk.ts";
-import { findKeyConflict } from "../src/commands.ts";
+import { findKeyConflicts } from "../src/commands.ts";
 import { formatLineRange, parseLineRange } from "../src/output.ts";
 import {
 	cleanOutput,
@@ -58,7 +58,7 @@ describe("config", () => {
 		expect(c.maxTimeoutMs).toBe(600_000);
 		expect(c.maxRunning).toBe(16);
 		expect(c.defaultNotify).toBe("wake");
-		expect(c.shortcuts).toEqual({ background: "ctrl+shift+b", manager: "shift+down" });
+		expect(c.shortcuts).toEqual({ background: "ctrl+b", manager: "shift+down" });
 		expect(c.dir).toMatch(/tasks$/);
 	});
 	test("overrides and clamps", () => {
@@ -90,7 +90,7 @@ describe("config file", () => {
 			write(join(proj, ".pi", "realtasks", "config.json"), JSON.stringify({ defaultTimeoutMs: 9000, shortcuts: { background: "alt+b" } }));
 			const untrusted = loadConfig(proj, false).config;
 			expect(untrusted.defaultTimeoutMs).toBe(5000);
-			expect(untrusted.shortcuts).toEqual({ background: "ctrl+shift+b", manager: "off" });
+			expect(untrusted.shortcuts).toEqual({ background: "ctrl+b", manager: "off" });
 			const trusted = loadConfig(proj, true).config;
 			expect(trusted.defaultTimeoutMs).toBe(9000);
 			expect(trusted.shortcuts).toEqual({ background: "alt+b", manager: "off" });
@@ -126,18 +126,19 @@ describe("config file", () => {
 });
 
 describe("keybinding conflicts", () => {
-	const resolved: Parameters<typeof findKeyConflict>[1] = {
+	const resolved: Parameters<typeof findKeyConflicts>[1] = {
 		"tui.editor.cursorLeft": ["left", "ctrl+b"],
 		"tui.altScreen.nextPrompt": ["ctrl+shift+down"],
 		"app.tools.expand": "ctrl+o",
+		"app.custom": ["ctrl+b"],
 	};
-	test("detects Pi bindings", () => {
-		expect(findKeyConflict("ctrl+b", resolved)).toBe("tui.editor.cursorLeft");
-		expect(findKeyConflict("CTRL+O", resolved)).toBe("app.tools.expand");
+	test("lists every Pi action bound to the key", () => {
+		expect(findKeyConflicts("ctrl+b", resolved)).toEqual(["tui.editor.cursorLeft", "app.custom"]);
+		expect(findKeyConflicts("CTRL+O", resolved)).toEqual(["app.tools.expand"]);
 	});
-	test("defaults are free", () => {
-		expect(findKeyConflict("ctrl+shift+b", resolved)).toBeUndefined();
-		expect(findKeyConflict("shift+down", resolved)).toBeUndefined();
+	test("unbound keys are free", () => {
+		expect(findKeyConflicts("ctrl+shift+b", resolved)).toEqual([]);
+		expect(findKeyConflicts("shift+down", resolved)).toEqual([]);
 	});
 });
 

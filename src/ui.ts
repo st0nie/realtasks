@@ -2,8 +2,21 @@
 
 import type { ExtensionContext, MessageRenderer, MessageRenderOptions, Theme } from "@earendil-works/pi-coding-agent";
 import { copyToClipboard } from "@earendil-works/pi-coding-agent";
-import { Box, matchesKey, MouseRegion, Text, truncateToWidth, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
-import { readTail } from "./output.ts";
+import {
+	Box,
+	matchesKey,
+	MouseRegion,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+	type Component,
+	type Keybinding,
+	type KeyId,
+	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
+import { readTail, TAIL_BYTES } from "./output.ts";
 import type { Runtime } from "./runtime.ts";
 import type { Task } from "./task.ts";
 import { cleanOutput, exitText, formatDuration, lastNonEmptyLine } from "./text.ts";
@@ -189,22 +202,57 @@ export type ManagerAction =
 	| { type: "restart"; id: string }
 	| undefined;
 
+/** The part of Pi's keybindings manager the overlay uses; user remaps in keybindings.json apply. */
+export interface OverlayKeys {
+	matches(data: string, keybinding: Keybinding): boolean;
+}
+
+/** Frame rows around the overlay body: top border, title, footer, bottom border. */
+const FRAME_ROWS = 4;
+/** Rows of the log pane taken by the task header (status, command, log path). */
+const LOG_HEADER_ROWS = 3;
+/** Pi clips the overlay to this share of the terminal rows (`maxHeight` in openManager). */
+const OVERLAY_HEIGHT = 0.9;
+
+const KEYS_FULL = "↑↓ select · shift+↑↓ pgup pgdn scroll · enter follow · k stop · i input · r restart · c copy path · x clear · esc close";
+const KEYS_SHORT = "↑↓ sel · shift+↑↓ pg scroll · ⏎ follow · k stop · i in · r restart · c copy · x clear · esc";
+
+/** Log scroll keys: Pi actions, fixed keys, a plain character, and the lines moved for a pane of `room` rows. */
+const SCROLL_KEYS: Array<{ ids: Keybinding[]; keys: KeyId[]; char?: string; lines: (room: number) => number }> = [
+	{ ids: ["tui.altScreen.lineUp"], keys: ["shift+up"], lines: () => -1 },
+	{ ids: ["tui.altScreen.lineDown"], keys: ["shift+down"], lines: () => 1 },
+	{ ids: ["tui.select.pageUp", "tui.altScreen.pageUp"], keys: [], lines: (room) => -Math.max(1, room - 1) },
+	{ ids: ["tui.select.pageDown", "tui.altScreen.pageDown"], keys: [], lines: (room) => Math.max(1, room - 1) },
+	{ ids: ["tui.altScreen.halfPageUp"], keys: ["ctrl+u"], lines: (room) => -Math.max(1, room >> 1) },
+	{ ids: ["tui.altScreen.halfPageDown"], keys: ["ctrl+d"], lines: (room) => Math.max(1, room >> 1) },
+	{ ids: ["tui.altScreen.top"], keys: ["home"], char: "g", lines: () => -Infinity },
+	{ ids: ["tui.altScreen.bottom"], keys: ["end"], char: "G", lines: () => Infinity },
+];
+
 export class TasksOverlay implements Component {
 	private selected = 0;
-	private follow = true;
-	private scroll = 0;
+	/** Id of the selected task, so the selection stays on it when the list changes. */
+	private selectedId: string | undefined;
+	/** First task row shown in the list pane. */
+	private listTop = 0;
+	/** Width of the list pane at the last render, for mouse hit tests. */
+	private leftW = 0;
+	/** Paused log view: a snapshot of the task's lines and the first one shown. Undefined while following. */
+	private paused: { id: string; lines: string[]; top: number } | undefined;
 	private flash = "";
 	private readonly rt: Runtime;
 	private readonly tui: TUI;
 	private readonly th: Theme;
+	private readonly kb: OverlayKeys;
 	private readonly done: (a: ManagerAction) => void;
 	private readonly off: () => void;
 	private readonly ticker: ReturnType<typeof setInterval>;
 
-	constructor(rt: Runtime, tui: TUI, th: Theme, done: (a: ManagerAction) => void) {
+	constructor(rt: Runtime, tui: TUI, th: Theme, kb: OverlayKeys, done: (a: ManagerAction) => void) {
 		this.rt = rt;
 		this.tui = tui;
 		this.th = th;
+		this.kb = kb;
 		this.done = done;
 		this.off = rt.onChange(() => this.tui.requestRender());
 		this.ticker = setInterval(() => this.tui.requestRender(), 1000);
@@ -217,32 +265,80 @@ export class TasksOverlay implements Component {
 		return this.rt.manager.list().toReversed();
 	}
 
-	private current(): Task | undefined {
-		const list = this.tasks();
-		if (this.selected >= list.length) this.selected = Math.max(0, list.length - 1);
+	/** The selected task. Follows it by id; when it is gone, keeps the row index. */
+	private current(list = this.tasks()): Task | undefined {
+		const at = list.findIndex((t) => t.rec.id === this.selectedId);
+		this.selected = Math.max(0, Math.min(list.length - 1, at >= 0 ? at : this.selected));
+		this.selectedId = list[this.selected]?.rec.id;
 		return list[this.selected];
+	}
+
+	private select(index: number): void {
+		const list = this.tasks();
+		this.selected = Math.max(0, Math.min(list.length - 1, index));
+		this.selectedId = list[this.selected]?.rec.id;
+	}
+
+	/** Body rows, sized so the frame still fits in what Pi leaves of the terminal. */
+	private rows(): number {
+		return Math.max(6, Math.min(30, Math.floor(this.tui.terminal.rows * OVERLAY_HEIGHT) - FRAME_ROWS));
+	}
+
+	private logRoom(): number {
+		return this.rows() - LOG_HEADER_ROWS;
+	}
+
+	/** Lines of `t`'s log to show and the index of the first visible one. */
+	private view(t: Task): { lines: string[]; top: number; maxTop: number } {
+		if (this.paused?.id !== t.rec.id) this.paused = undefined;
+		let lines = this.paused?.lines;
+		if (!lines) {
+			lines = cleanOutput(t.running ? t.ring.recent() : readTail(t.rec.logPath, TAIL_BYTES)).split("\n");
+			if (lines.at(-1) === "") lines.pop();
+		}
+		const maxTop = Math.max(0, lines.length - this.logRoom());
+		return { lines, top: this.paused ? Math.min(this.paused.top, maxTop) : maxTop, maxTop };
+	}
+
+	/** Move the log view by `delta` lines, clamped to the log. Reaching the end resumes follow. */
+	private scrollLog(t: Task, delta: number): void {
+		const { lines, top, maxTop } = this.view(t);
+		const next = Math.max(0, Math.min(maxTop, top + delta));
+		this.paused = next < maxTop ? { id: t.rec.id, lines, top: next } : undefined;
+	}
+
+	private toggleFollow(t: Task): void {
+		if (this.paused) {
+			this.paused = undefined;
+			return;
+		}
+		const { lines, top } = this.view(t);
+		this.paused = { id: t.rec.id, lines, top };
+	}
+
+	/** Lines a log scroll key moves the view by; undefined for any other key. */
+	private scrollDelta(data: string): number | undefined {
+		const hit = SCROLL_KEYS.find(
+			(k) => k.ids.some((id) => this.kb.matches(data, id)) || k.keys.some((key) => matchesKey(data, key)) || data === k.char,
+		);
+		return hit?.lines(this.logRoom());
 	}
 
 	handleInput(data: string): void {
 		const t = this.current();
+		const is = (id: Keybinding) => this.kb.matches(data, id);
 		this.flash = "";
-		if (matchesKey(data, "escape") || data === "q") return this.close(undefined);
+		if (is("tui.select.cancel") || data === "q") return this.close(undefined);
 		if (t && data === "r") return this.close({ type: "restart", id: t.rec.id });
-		if (matchesKey(data, "up")) {
-			this.selected = Math.max(0, this.selected - 1);
-			this.scroll = 0;
-		} else if (matchesKey(data, "down")) {
-			this.selected = Math.min(this.tasks().length - 1, this.selected + 1);
-			this.scroll = 0;
-		} else if (matchesKey(data, "return")) {
-			this.follow = !this.follow;
-			this.scroll = 0;
-		} else if (matchesKey(data, "pageUp")) {
-			this.follow = false;
-			this.scroll += 10;
-		} else if (matchesKey(data, "pageDown")) {
-			this.scroll = Math.max(0, this.scroll - 10);
-			if (this.scroll === 0) this.follow = true;
+		const delta = this.scrollDelta(data);
+		if (delta !== undefined) {
+			if (t) this.scrollLog(t, delta);
+		} else if (is("tui.select.up")) {
+			this.select(this.selected - 1);
+		} else if (is("tui.select.down")) {
+			this.select(this.selected + 1);
+		} else if (is("tui.select.confirm")) {
+			if (t) this.toggleFollow(t);
 		} else if (t && data === "k") {
 			if (t.running) {
 				t.stop();
@@ -269,6 +365,25 @@ export class TasksOverlay implements Component {
 		this.tui.requestRender();
 	}
 
+	/** Wheel over the log scrolls it, over the list moves the selection; a left click selects a task row. */
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const overList = event.x <= this.leftW;
+		const t = this.current();
+		if (event.type === "wheel") {
+			const delta = event.wheelDelta ?? 0;
+			if (overList) this.select(this.selected + Math.sign(delta));
+			else if (t) this.scrollLog(t, delta);
+			return { handled: true };
+		}
+		if (event.type !== "click" || event.button !== "left" || !overList) return undefined;
+		// Body rows start below the top border and the title.
+		const row = event.y - 2;
+		const index = this.listTop + row;
+		if (row < 0 || row >= this.rows() || index >= this.tasks().length) return undefined;
+		this.select(index);
+		return { handled: true };
+	}
+
 	private close(a: ManagerAction): void {
 		this.dispose();
 		this.done(a);
@@ -280,23 +395,27 @@ export class TasksOverlay implements Component {
 		const inner = w - 2;
 		const leftW = Math.min(44, Math.floor(inner * 0.4));
 		const rightW = inner - leftW - 1;
-		const height = Math.max(10, Math.min(30, this.tui.terminal.rows - 6));
+		const rows = this.rows();
 		const pad = (s: string, n: number) => {
 			const c = truncateToWidth(s, n);
 			return c + " ".repeat(Math.max(0, n - visibleWidth(c)));
 		};
 		const border = (s: string) => th.fg("border", s);
 		const tasks = this.tasks();
-		const cur = this.current();
+		const cur = this.current(tasks);
+		this.leftW = leftW;
 
-		const left: string[] = tasks.map((t, i) => {
-			const sel = i === this.selected;
+		// Keep the selected row inside the list window.
+		this.listTop = Math.max(0, Math.min(this.listTop, tasks.length - rows, this.selected));
+		if (this.selected >= this.listTop + rows) this.listTop = this.selected - rows + 1;
+		const left: string[] = tasks.slice(this.listTop, this.listTop + rows).map((t) => {
 			const line = `${statusIcon(t, th)} ${t.rec.id} ${t.rec.label}`;
-			return sel ? th.fg("accent", `▶ ${line}`) : `  ${line}`;
+			return t === cur ? th.fg("accent", `▶ ${line}`) : `  ${line}`;
 		});
 		if (left.length === 0) left.push(th.fg("dim", "  no tasks"));
 
 		let right: string[] = [];
+		let state = "";
 		if (cur) {
 			const r = cur.rec;
 			const cmd = r.rewritten ? `${r.requested} → ${r.executed}` : r.executed;
@@ -304,20 +423,22 @@ export class TasksOverlay implements Component {
 			right.push(th.bold(`${r.id} ${r.status}${outcome ? ` ${outcome}` : ""} · ${formatDuration((r.endedAt ?? Date.now()) - r.startedAt)}`));
 			right.push(th.fg("dim", `$ ${cmd}`));
 			right.push(th.fg("dim", `log: ${r.logPath}`));
-			const log = cleanOutput(cur.running ? cur.ring.recent() : readTail(r.logPath, 64 * 1024)).split("\n");
-			const room = height - right.length;
-			const end = Math.max(0, log.length - (this.follow ? 0 : this.scroll));
-			right = right.concat(log.slice(Math.max(0, end - room), end));
+			const { lines, top } = this.view(cur);
+			const shown = lines.slice(top, top + rows - LOG_HEADER_ROWS);
+			if (!this.paused) state = th.fg("dim", "following");
+			else state = th.fg("warning", shown.length ? `paused · lines ${top + 1}-${top + shown.length} of ${lines.length}` : "paused");
+			right = right.concat(shown);
 		}
 
 		const lines: string[] = [];
-		const title = ` Tasks ${th.fg("dim", `(${tasks.filter((t) => t.running).length} running)`)} `;
+		const title = ` Tasks ${th.fg("dim", `(${tasks.filter((t) => t.running).length} running)`)}`;
+		const gap = inner - visibleWidth(title) - visibleWidth(state) - 1;
 		lines.push(border(`╭${"─".repeat(inner)}╮`));
-		lines.push(border("│") + pad(title, inner) + border("│"));
-		for (let i = 0; i < height; i++) {
+		lines.push(border("│") + (gap > 0 ? `${title}${" ".repeat(gap)}${state} ` : pad(title, inner)) + border("│"));
+		for (let i = 0; i < rows; i++) {
 			lines.push(border("│") + pad(left[i] ?? "", leftW) + border("│") + pad(right[i] ?? "", rightW) + border("│"));
 		}
-		const keys = "↑↓ select · enter follow · k stop · i input · r restart · c copy path · x clear · esc close";
+		const keys = visibleWidth(KEYS_FULL) <= inner ? KEYS_FULL : KEYS_SHORT;
 		lines.push(border("│") + pad(th.fg("dim", this.flash || keys), inner) + border("│"));
 		lines.push(border(`╰${"─".repeat(inner)}╯`));
 		return lines;

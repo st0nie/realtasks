@@ -1,7 +1,7 @@
 // realtasks — background tasks for Pi.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerCommands, registerShortcuts } from "./src/commands.ts";
+import { backgroundInput, registerCommands, registerShortcuts } from "./src/commands.ts";
 import { NOTIFICATION_TYPE, type NotificationDetails } from "./src/notify.ts";
 import { stashCommand } from "./src/rtk.ts";
 import { Runtime } from "./src/runtime.ts";
@@ -26,6 +26,7 @@ export default function realtasks(pi: ExtensionAPI): void {
 	registerCommands(pi, rt);
 
 	let disposeDock: (() => void) | undefined;
+	let disposeInput: (() => void) | undefined;
 	let shortcutsBound = false;
 	let printWaitStarted = 0;
 
@@ -76,6 +77,11 @@ export default function realtasks(pi: ExtensionAPI): void {
 		}
 		disposeDock?.();
 		disposeDock = installDock(rt, ctx);
+		disposeInput?.();
+		disposeInput =
+			ctx.mode === "tui" && rt.backgroundGated && rt.backgroundKey
+				? ctx.ui.onTerminalInput(backgroundInput(rt, ctx, rt.backgroundKey))
+				: undefined;
 		void sweepOld(rt.cfg.dir, rt.cfg.logRetentionDays);
 	});
 
@@ -92,6 +98,8 @@ export default function realtasks(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", async (event) => {
 		disposeDock?.();
 		disposeDock = undefined;
+		disposeInput?.();
+		disposeInput = undefined;
 		const reason = event.reason === "reload" || event.reason === "quit" ? event.reason : "switch";
 		rt.manager.detach(reason);
 		rt.foreground.clear();
