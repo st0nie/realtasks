@@ -24,8 +24,8 @@ export class Runtime {
 	backgroundKey: string | undefined;
 	/** The background key is an editor key: it acts through the input listener, only on an empty input. */
 	backgroundGated = false;
-	/** The /tasks overlay has focus. */
-	managerOpen = false;
+	/** A realtasks panel (the /tasks manager or /tasks settings) has focus. */
+	panelOpen = false;
 	private listeners = new Set<() => void>();
 
 	constructor(pi: ExtensionAPI) {

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DEFAULTS, loadConfig, mergeConfig, resolveConfig } from "../src/config.ts";
 import { COALESCE_MS, IDLE_RUNNING_COALESCE_MS, Notifier, type NoticeItem, terminalBlock } from "../src/notify.ts";
 import { commandFromBranch, recoverCommand, stashCommand } from "../src/rtk.ts";
-import { findKeyConflicts } from "../src/commands.ts";
+import { findKeyConflicts } from "../src/shortcuts.ts";
 import { formatLineRange, parseLineRange } from "../src/output.ts";
 import {
 	cleanOutput,

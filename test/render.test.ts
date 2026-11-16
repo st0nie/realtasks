@@ -114,9 +114,9 @@ describe("foreground bash hint and window", () => {
 		text = "draft";
 		expect(input(CTRL_B)).toBeUndefined();
 		text = "";
-		rt.managerOpen = true;
+		rt.panelOpen = true;
 		expect(input(CTRL_B)).toBeUndefined();
-		rt.managerOpen = false;
+		rt.panelOpen = false;
 		// Other keys and the kitty key release of ctrl+b pass through.
 		expect(input("b")).toBeUndefined();
 		expect(input("\x1b[98;5:3u")).toBeUndefined();

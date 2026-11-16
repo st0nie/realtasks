@@ -1,8 +1,8 @@
 // Config from <agentDir>/realtasks/config.json, overridable per trusted project
 // in .pi/realtasks/config.json.
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 export type NotifyPolicy = "wake" | "passive" | "silent";
@@ -41,6 +41,16 @@ export const DEFAULTS: TasksConfig = {
 	dir: "",
 };
 
+/** Smallest accepted values; anything lower falls back to the default (`resolveConfig`) or is refused (`/tasks settings`). */
+export const MINIMUMS = {
+	timeoutMs: 1000,
+	maxRunning: 1,
+	maxLogBytes: 64 * 1024,
+	logRetentionDays: 0,
+	stallSeconds: 1,
+	printModeMaxWaitMs: 0,
+} as const;
+
 function num(v: unknown, d: number, min = 0): number {
 	return typeof v === "number" && Number.isFinite(v) && v >= min ? v : d;
 }
@@ -50,17 +60,17 @@ export function resolveConfig(raw: unknown): TasksConfig {
 	const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
 	const sc = (r.shortcuts && typeof r.shortcuts === "object" ? r.shortcuts : {}) as Record<string, unknown>;
 	const notify = r.defaultNotify;
-	const maxTimeoutMs = Math.max(1000, num(r.maxTimeoutMs, DEFAULTS.maxTimeoutMs));
+	const maxTimeoutMs = Math.max(MINIMUMS.timeoutMs, num(r.maxTimeoutMs, DEFAULTS.maxTimeoutMs));
 	return {
-		defaultTimeoutMs: Math.min(maxTimeoutMs, Math.max(1000, num(r.defaultTimeoutMs, DEFAULTS.defaultTimeoutMs))),
+		defaultTimeoutMs: Math.min(maxTimeoutMs, Math.max(MINIMUMS.timeoutMs, num(r.defaultTimeoutMs, DEFAULTS.defaultTimeoutMs))),
 		maxTimeoutMs,
-		maxRunning: num(r.maxRunning, DEFAULTS.maxRunning, 1),
-		maxLogBytes: num(r.maxLogBytes, DEFAULTS.maxLogBytes, 64 * 1024),
-		logRetentionDays: num(r.logRetentionDays, DEFAULTS.logRetentionDays),
-		stallSeconds: num(r.stallSeconds, DEFAULTS.stallSeconds, 1),
+		maxRunning: num(r.maxRunning, DEFAULTS.maxRunning, MINIMUMS.maxRunning),
+		maxLogBytes: num(r.maxLogBytes, DEFAULTS.maxLogBytes, MINIMUMS.maxLogBytes),
+		logRetentionDays: num(r.logRetentionDays, DEFAULTS.logRetentionDays, MINIMUMS.logRetentionDays),
+		stallSeconds: num(r.stallSeconds, DEFAULTS.stallSeconds, MINIMUMS.stallSeconds),
 		defaultNotify:
 			notify === "wake" || notify === "passive" || notify === "silent" ? notify : DEFAULTS.defaultNotify,
-		printModeMaxWaitMs: num(r.printModeMaxWaitMs, DEFAULTS.printModeMaxWaitMs),
+		printModeMaxWaitMs: num(r.printModeMaxWaitMs, DEFAULTS.printModeMaxWaitMs, MINIMUMS.printModeMaxWaitMs),
 		rtkPassthroughFor: Array.isArray(r.rtkPassthroughFor)
 			? r.rtkPassthroughFor.filter((x): x is string => typeof x === "string")
 			: DEFAULTS.rtkPassthroughFor,
@@ -118,4 +128,46 @@ export function loadConfig(cwd: string, trusted: boolean): { config: TasksConfig
 		raw = mergeConfig(raw, proj.raw);
 	}
 	return { config: resolveConfig(raw), warnings };
+}
+
+function sameJson(a: unknown, b: unknown): boolean {
+	return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Drop keys whose value equals the default, so a saved file holds only what the
+ * user changed. `shortcuts` is pruned per key; keys realtasks does not know stay.
+ */
+export function pruneDefaults(raw: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(raw)) {
+		if (key === "shortcuts" && value && typeof value === "object" && !Array.isArray(value)) {
+			const sc = Object.fromEntries(
+				Object.entries(value).filter(([k, v]) => !(k in DEFAULTS.shortcuts) || v !== DEFAULTS.shortcuts[k as keyof TasksConfig["shortcuts"]]),
+			);
+			if (Object.keys(sc).length > 0) out.shortcuts = sc;
+			continue;
+		}
+		if (key === "rtkPassthroughFor" && Array.isArray(value)) {
+			const asSet = (a: unknown[]) => JSON.stringify([...new Set(a.map(String))].toSorted((x, y) => x.localeCompare(y)));
+			if (asSet(value) !== asSet(DEFAULTS.rtkPassthroughFor)) out[key] = value;
+			continue;
+		}
+		if (key in DEFAULTS && key !== "dir" && sameJson(value, DEFAULTS[key as keyof TasksConfig])) continue;
+		out[key] = value;
+	}
+	return out;
+}
+
+/** Replace a config file atomically: write a sibling temp file, then rename it over the target. */
+export function writeConfigFile(path: string, raw: Record<string, unknown>): void {
+	mkdirSync(dirname(path), { recursive: true });
+	const tmp = `${path}.${process.pid}.tmp`;
+	try {
+		writeFileSync(tmp, `${JSON.stringify(raw, null, 2)}\n`);
+		renameSync(tmp, path);
+	} catch (e) {
+		rmSync(tmp, { force: true });
+		throw e;
+	}
 }

@@ -81,12 +81,15 @@ Output goes to `~/.pi/agent/tasks/<session>/<id>.log`. Logs rotate at 50 MB and 
   Scrolling up pauses the view, so it holds still while the task keeps writing; scrolling back to the end follows the output again. In Pi's fullscreen mode the mouse wheel scrolls the log, or moves the selection over the list, and a click selects a task.
 - `/bg <cmd>` starts a task yourself. Its completion never wakes the agent.
 - `/tasks stop <id|all>` stops tasks. `/tasks clear` removes finished tasks the agent has already seen; `/tasks clear all` removes every finished task. `/tasks log <id>` shows a task's log path and last 20 lines.
+- `/tasks settings` opens a settings panel for the configuration below.
 
 Shortcuts never take over a key Pi already binds. `ctrl+b` is Pi's cursor-left, so realtasks shares it instead: it acts only when the input is empty and a foreground command is running. Any other setting that clashes with a Pi binding is skipped with a warning; a key Pi does not bind works whatever the input holds.
 
 ## Configuration
 
 Config lives in `~/.pi/agent/realtasks/config.json` (optional; missing means defaults). A trusted project can override keys in `.pi/realtasks/config.json`. realtasks does not read Pi's `settings.json`.
+
+The easiest way to change it is `/tasks settings`. Pick a row and press `enter`: on/off rows and the notification policy cycle in place; the others offer presets plus `Custom…`, where you type a value such as `90s`, `200 MB` or `alt+t`. Values are checked before they are saved, and each change is written to the user file at once and applies right away. The file keeps only what differs from the defaults, and keys the panel does not show (such as `dir`) are left as they are. A changed shortcut takes effect after `/reload`. The panel edits the user file only; a row that a trusted project overrides names the project value in its description.
 
 ```json
 {
@@ -103,7 +106,7 @@ Config lives in `~/.pi/agent/realtasks/config.json` (optional; missing means def
 }
 ```
 
-Set a shortcut to `"off"` to disable it. Config changes take effect on `/reload`.
+Set a shortcut to `"off"` to disable it. Edits made to the file directly take effect on `/reload`.
 
 ## Development
 

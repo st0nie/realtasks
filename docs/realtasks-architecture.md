@@ -322,8 +322,9 @@ The user sees what is running at a glance and can take over any task without ask
 | `/tasks stop <id or all>` | Stop from the command line |
 | `/tasks clear [all]` | Remove finished tasks from the list, the dock and the status counts. Their logs stay on disk until the retention sweep. A finished task whose outcome the agent has not read yet is kept unless `all` is given (tasks the agent is never told about, `/bg <cmd>` tasks and `notify: "silent"` tasks, do not count as unread and are always cleared); `all` also marks those as read, so no notification for them is sent later. Running tasks are never touched (stop them first). Reports how many were cleared and how many unread ones were kept |
 | `/tasks log <id>` | Print the task's log path and its last 20 lines as a UI notice (no model context) |
+| `/tasks settings` | Edit the configuration in a settings panel |
 
-**Sharing `ctrl+b` with the editor.** Pi binds `ctrl+b` to cursor-left (`tui.editor.cursorLeft`). A key registered with `registerShortcut` goes to the extension before the editor sees it, and the handler cannot decline it, so realtasks does not register `ctrl+b` as a shortcut. It installs a raw input listener instead (`ctx.ui.onTerminalInput`, on every `session_start` in the TUI). The listener consumes the key and promotes the foreground commands only when all of these hold: the input is empty, at least one foreground command is running, and the `/tasks` manager is closed. In every other case the key passes through untouched and stays cursor-left, which does nothing on an empty input. Key release events are ignored. The listener runs before Pi's focus dispatch, so the rule also applies while a Pi dialog has focus.
+**Sharing `ctrl+b` with the editor.** Pi binds `ctrl+b` to cursor-left (`tui.editor.cursorLeft`). A key registered with `registerShortcut` goes to the extension before the editor sees it, and the handler cannot decline it, so realtasks does not register `ctrl+b` as a shortcut. It installs a raw input listener instead (`ctx.ui.onTerminalInput`, on every `session_start` in the TUI). The listener consumes the key and promotes the foreground commands only when all of these hold: the input is empty, at least one foreground command is running, and no realtasks panel (the `/tasks` manager or `/tasks settings`) is open. In every other case the key passes through untouched and stays cursor-left, which does nothing on an empty input. Key release events are ignored. The listener runs before Pi's focus dispatch, so the rule also applies while a Pi dialog has focus.
 
 **No other conflicts with Pi's keybindings.** realtasks never takes over a key Pi binds by default (for example `ctrl+shift+up`/`down` jump between prompts) or one the user bound in `keybindings.json`. At the first `session_start`, each configured shortcut is checked against Pi's resolved keybindings (`getKeybindings().getResolvedBindings()`, which merges defaults and user bindings):
 
@@ -333,11 +334,36 @@ The user sees what is running at a glance and can take over any task without ask
 
 `/bg` and `/tasks` always remain available. Every shortcut is remappable in that config, and `off` disables it.
 
+**`/tasks settings`.** A settings panel in the style of Pi's own `/settings` (`ctx.ui.custom`, shown in place of the editor): a title with the config path, then a `SettingsList` between two borders. `↑↓` move, `enter` changes the selected row, `esc` closes. Each row shows a label, the current value, and a description while selected.
+
+| Row | Key | How `enter` edits it |
+| --- | --- | --- |
+| Foreground window | `defaultTimeoutMs` | Presets `30s`, `1m`, `2m`, `5m`, `10m`, or a custom duration |
+| Longest foreground window | `maxTimeoutMs` | Presets `2m`, `5m`, `10m`, `30m`, `1h`, or a custom duration |
+| Default notification | `defaultNotify` | Cycles `wake`, `passive`, `silent` |
+| Running task limit | `maxRunning` | Presets `4`, `8`, `16`, `32`, `64`, or a custom count |
+| Stall check after | `stallSeconds` | Presets `15s`, `30s`, `45s`, `1m`, `2m`, `5m`, or a custom duration |
+| Log size limit | `maxLogBytes` | Presets `10 MB`, `50 MB`, `100 MB`, `500 MB`, `1 GB`, or a custom size |
+| Log retention | `logRetentionDays` | Presets `keep forever`, `1 day`, `3 days`, `7 days`, `14 days`, `30 days`, or a custom number of days |
+| Print mode wait | `printModeMaxWaitMs` | Presets `no wait`, `1m`, `5m`, `10m`, `30m`, `1h`, or a custom duration |
+| Original command with `ready` | `rtkPassthroughFor` holds `ready` | Toggles `true`, `false` |
+| Original command with `tty` | `rtkPassthroughFor` holds `tty` | Toggles `true`, `false` |
+| Background shortcut | `shortcuts.background` | Presets `ctrl+b`, `ctrl+shift+b`, `off`, or a custom key |
+| Manager shortcut | `shortcuts.manager` | Presets `shift+down`, `off`, or a custom key |
+
+A row with presets opens a submenu: the presets, with the default marked, and `Custom…`, which opens a one-line input. A custom duration is written as `90s`, `5m`, `1h30m` or a bare number of seconds; a size as `200 MB` or `2 GB` (a bare number is megabytes); a key as Pi writes key ids (`ctrl+shift+b`, `alt+t`, `f6`). The input is checked before it is accepted, and a rejected value shows why under the input: below the key's minimum (the same limits `resolveConfig` applies), a foreground window longer than the longest one, a key id Pi cannot parse, a shortcut that types text (a letter, digit, symbol or `space` without `ctrl`, `alt` or `super`), or a shortcut that the conflict rules above would refuse to register. `dir` is not in the panel, because moving the log root under running tasks would lose them; set it in the file.
+
+Every change is saved at once to the user file, `<agentDir>/realtasks/config.json`, and the config is reloaded, so it applies to the next command or task without `/reload`. Shortcuts are the exception: Pi reads them at `session_start`, so the panel says on close that a changed shortcut needs `/reload`. The file keeps only what differs from the defaults: choosing a default value removes its key. Keys the panel does not know are left alone, and the file is replaced atomically (temporary file, then rename). When the user file is not valid JSON the panel does not open and names the file, so a broken file is never overwritten.
+
+The panel edits the user file only. When a trusted project overrides a key in `.pi/realtasks/config.json`, the row still shows and edits the user value, and its description names the project value that is in effect.
+
+Outside the TUI, `/tasks settings` prints the effective configuration and the path of the user file as a notice.
+
 Non-TUI modes: tools and notifications behave the same; dock, overlay and shortcuts are skipped (`ctx.mode !== "tui"`); RPC clients get notifications through `ctx.ui.notify` where supported.
 
 ## Configuration
 
-All keys live in `<agentDir>/realtasks/config.json` (default `~/.pi/agent/realtasks/config.json`; `PI_CODING_AGENT_DIR` moves it). A trusted project can override keys in `.pi/realtasks/config.json`; project values apply only when `ctx.isProjectTrusted()` is true. The file is optional; a missing file means defaults. Invalid JSON or a non-object top level is reported once with a warning and that file is ignored; invalid individual values fall back to their defaults. Config is read at `session_start`, so edits take effect on `/reload`. realtasks does not read Pi's `settings.json`.
+All keys live in `<agentDir>/realtasks/config.json` (default `~/.pi/agent/realtasks/config.json`; `PI_CODING_AGENT_DIR` moves it). A trusted project can override keys in `.pi/realtasks/config.json`; project values apply only when `ctx.isProjectTrusted()` is true. The file is optional; a missing file means defaults. Invalid JSON or a non-object top level is reported once with a warning and that file is ignored; invalid individual values fall back to their defaults. Config is read at `session_start`, so edits to the file take effect on `/reload`; changes made in `/tasks settings` apply at once (see User UX). realtasks does not read Pi's `settings.json`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

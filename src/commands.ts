@@ -1,7 +1,9 @@
 // Slash commands (/bg, /tasks) and shortcuts.
 
 import type { ExtensionAPI, ExtensionContext, TerminalInputHandler } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, isKeyRelease, matchesKey, type KeyId } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey, type KeyId } from "@earendil-works/pi-tui";
+import { openSettings } from "./settings.ts";
+import { piBindings, planShortcut, type ResolvedBindings, type ShortcutSetting } from "./shortcuts.ts";
 import type { Runtime } from "./runtime.ts";
 import type { Task } from "./task.ts";
 import { readTail } from "./output.ts";
@@ -39,14 +41,14 @@ export async function openManager(rt: Runtime, ctx: ExtensionContext): Promise<v
 		return;
 	}
 	let action: ManagerAction;
-	rt.managerOpen = true;
+	rt.panelOpen = true;
 	try {
 		action = await ctx.ui.custom<ManagerAction>(
 			(tui, theme, kb, done) => new TasksOverlay(rt, tui, theme, kb, done),
 			{ overlay: true, overlayOptions: { width: "90%", maxHeight: "90%", anchor: "center" } },
 		);
 	} finally {
-		rt.managerOpen = false;
+		rt.panelOpen = false;
 	}
 	if (!action) return;
 	const t = rt.manager.get(action.id);
@@ -88,10 +90,10 @@ export function registerCommands(pi: ExtensionAPI, rt: Runtime): void {
 		},
 	});
 
-	const USAGE = "Usage: /tasks · /tasks stop <id|all> · /tasks clear [all] · /tasks log <id>";
-	const SUBS = ["stop", "clear", "log"];
+	const USAGE = "Usage: /tasks · /tasks stop <id|all> · /tasks clear [all] · /tasks log <id> · /tasks settings";
+	const SUBS = ["stop", "clear", "log", "settings"];
 	pi.registerCommand("tasks", {
-		description: "Open the task manager, or /tasks stop <id|all> · clear [all] · log <id>",
+		description: "Open the task manager, or /tasks stop <id|all> · clear [all] · log <id> · settings",
 		getArgumentCompletions: (prefix) => {
 			const parts = prefix.split(/\s+/);
 			if (parts.length <= 1) {
@@ -108,6 +110,7 @@ export function registerCommands(pi: ExtensionAPI, rt: Runtime): void {
 		handler: async (args, ctx) => {
 			const [sub, arg] = args.trim().split(/\s+/);
 			if (!sub) return openManager(rt, ctx);
+			if (sub === "settings" && arg === undefined) return openSettings(rt, ctx);
 			try {
 				if (sub === "stop" && arg) {
 					const targets = arg === "all" ? rt.manager.list().filter((t) => t.running) : [rt.manager.resolve(arg)];
@@ -131,29 +134,6 @@ export function registerCommands(pi: ExtensionAPI, rt: Runtime): void {
 	});
 }
 
-type ResolvedBindings = Record<string, KeyId | KeyId[] | undefined>;
-
-/** Pi actions already bound to `key` (defaults merged with keybindings.json). */
-export function findKeyConflicts(key: string, resolved: ResolvedBindings): string[] {
-	const k = key.toLowerCase();
-	return Object.entries(resolved)
-		.filter(([, keys]) => [keys].flat().some((x) => x?.toLowerCase() === k))
-		.map(([action]) => action);
-}
-
-/**
- * Pi's resolved bindings. In the TUI, Pi installs its full manager (app and
- * editor defaults plus keybindings.json) with setKeybindings() before
- * session_start, so call this from session_start, not at load.
- */
-export function piBindings(): ResolvedBindings {
-	try {
-		return getKeybindings().getResolvedBindings() as ResolvedBindings;
-	} catch {
-		return {};
-	}
-}
-
 /**
  * Called from session_start (Pi reads extension shortcuts right after it), so
  * remapping takes effect on /reload. "off" disables a binding. A background key
@@ -163,18 +143,18 @@ export function piBindings(): ResolvedBindings {
  */
 export function registerShortcuts(pi: ExtensionAPI, rt: Runtime, resolved: ResolvedBindings = piBindings()): string[] {
 	const warnings: string[] = [];
-	const bind = (setting: "background" | "manager", description: string, run: (ctx: ExtensionContext) => void) => {
+	const bind = (setting: ShortcutSetting, description: string, run: (ctx: ExtensionContext) => void) => {
 		const key = rt.cfg.shortcuts[setting];
 		if (key === "off") return;
-		const clashes = findKeyConflicts(key, resolved);
-		if (setting === "background" && clashes.length > 0 && clashes.every((a) => a.startsWith("tui.editor."))) {
+		const plan = planShortcut(setting, key, resolved);
+		if (plan.kind === "shared") {
 			rt.backgroundKey = key;
 			rt.backgroundGated = true;
 			return;
 		}
-		if (clashes.length > 0) {
+		if (plan.kind === "clash") {
 			warnings.push(
-				`realtasks: shortcut ${key} is Pi's ${clashes[0]}; not registered. Set shortcuts.${setting} in realtasks/config.json to another key or "off".`,
+				`realtasks: shortcut ${key} is Pi's ${plan.action}; not registered. Set shortcuts.${setting} in /tasks settings or realtasks/config.json to another key or "off".`,
 			);
 			return;
 		}
@@ -199,7 +179,7 @@ export function registerShortcuts(pi: ExtensionAPI, rt: Runtime, resolved: Resol
 export function backgroundInput(rt: Runtime, ctx: ExtensionContext, key: string): TerminalInputHandler {
 	const id = key.toLowerCase() as KeyId;
 	return (data) => {
-		if (rt.foreground.size === 0 || rt.managerOpen) return undefined;
+		if (rt.foreground.size === 0 || rt.panelOpen) return undefined;
 		if (isKeyRelease(data) || !matchesKey(data, id)) return undefined;
 		if (ctx.ui.getEditorText().length > 0) return undefined;
 		promoteShortcut(rt, ctx);
