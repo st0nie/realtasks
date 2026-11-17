@@ -154,6 +154,54 @@ describe("bash override", () => {
 		expect(text(out)).toContain("completed");
 		expect(text(out)).not.toContain("timed_out");
 	});
+
+	test("generic command-rewriting hooks are preserved by default and bypassed by rewrite=off or passthroughFor", async () => {
+		const sub = setup("s-hook");
+		// Simulate any third-party command-modifier extension registered on tool_call.
+		sub.pi.on("tool_call", (ev: unknown) => {
+			const e = ev as { toolName?: string; input?: { command?: string } };
+			if (e.toolName === "bash" && e.input?.command) {
+				e.input.command = `printf '[wrapped] '; ${e.input.command}`;
+			}
+			return undefined;
+		});
+		await sub.emit("session_start", { type: "session_start", reason: "startup" }, sub.ctx);
+		try {
+			const callWithHook = async (id: string, params: Record<string, unknown>) => {
+				const input = { ...params };
+				await sub.emit("tool_call", { type: "tool_call", toolCallId: id, toolName: "bash", input }, sub.ctx);
+				return sub.call("bash", input, id);
+			};
+
+			// 1. Default (rewrite: auto): modifier's rewrite runs.
+			const wrapped = await callWithHook("h-auto", { command: "echo plain" });
+			expect(text(wrapped)).toContain("[wrapped] plain");
+
+			// 2. Explicit rewrite: "off": bypasses the modifier and runs the exact original command.
+			const raw = await callWithHook("h-off", { command: "echo plain", rewrite: "off" });
+			expect(text(raw)).toContain("plain");
+			expect(text(raw)).not.toContain("[wrapped]");
+			expect(text(raw)).toContain("(ran the original command; command rewrite skipped)");
+
+			// 3. ready condition: passthroughFor=["ready","tty"] bypasses the modifier automatically.
+			const rdy = await callWithHook("h-ready", {
+				command: "echo 'READY 1'; sleep 5",
+				ready: { pattern: "^READY 1$", timeout_ms: 3000 },
+				notify: "silent",
+			});
+			expect(text(rdy)).toContain("is ready (pattern matched)");
+			expect(text(rdy)).not.toContain("[wrapped]");
+			expect(text(rdy)).toContain("(ran the original command; command rewrite skipped for live output)");
+			await sub.call("task_stop", { id: taskId(rdy), grace_ms: 200 });
+
+			// 4. Unrecoverable original (no tool_call stash and empty branch) with rewrite: "off" explains cleanly.
+			const unknown = await sub.call("bash", { command: "echo direct", rewrite: "off" }, "h-unknown");
+			expect(text(unknown)).toContain("direct");
+			expect(text(unknown)).toContain("(rewrite: off requested, but the original command was not recoverable; ran as received)");
+		} finally {
+			await sub.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, sub.ctx);
+		}
+	});
 });
 
 

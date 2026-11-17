@@ -1,5 +1,5 @@
-// rtk compatibility: recover the model's original `bash` command after the
-// rtk hook rewrote `event.input.command` in place.
+// Command-rewrite compatibility: recover the model's original `bash` command
+// after a `tool_call` hook rewrote `event.input.command` in place.
 
 export interface BranchEntryLike {
 	type: string;
@@ -50,8 +50,8 @@ export interface Recovered {
 }
 
 /**
- * Step 1: our stash (exact if we load before rtk). Step 2: the transcript.
- * Step 3: unknown, run the rewrite and say so.
+ * Step 1: our stash (exact if we load before the rewriting hook). Step 2: the transcript.
+ * Step 3: unknown, run as received and say so when `rewrite: "off"` was requested.
  */
 export function recoverCommand(
 	toolCallId: string,
@@ -69,12 +69,8 @@ export function recoverCommand(
 		}
 	}
 	if (original === undefined) {
-		// Stash matched executed (no rewrite, or we ran after rtk) and the branch had nothing.
+		// Stash matched executed (no rewrite, or we ran after the hook) and the branch had nothing.
 		return { requested: executed, executed, rewritten: false, known: stashed !== undefined };
 	}
 	return { requested: original, executed, rewritten: original !== executed, known: true };
-}
-
-export function looksLikeRtk(executed: string): boolean {
-	return /^\s*rtk\s/.test(executed);
 }

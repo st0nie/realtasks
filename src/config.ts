@@ -18,7 +18,7 @@ export interface TasksConfig {
 	stallSeconds: number;
 	defaultNotify: NotifyPolicy;
 	printModeMaxWaitMs: number;
-	rtkPassthroughFor: string[];
+	passthroughFor: string[];
 	shortcuts: { background: string; manager: string };
 	dir: string;
 }
@@ -36,7 +36,7 @@ export const DEFAULTS: TasksConfig = {
 	stallSeconds: 45,
 	defaultNotify: "wake",
 	printModeMaxWaitMs: 600_000,
-	rtkPassthroughFor: ["ready", "tty"],
+	passthroughFor: ["ready", "tty"],
 	shortcuts: { background: "ctrl+b", manager: "shift+down" },
 	dir: "",
 };
@@ -71,9 +71,9 @@ export function resolveConfig(raw: unknown): TasksConfig {
 		defaultNotify:
 			notify === "wake" || notify === "passive" || notify === "silent" ? notify : DEFAULTS.defaultNotify,
 		printModeMaxWaitMs: num(r.printModeMaxWaitMs, DEFAULTS.printModeMaxWaitMs, MINIMUMS.printModeMaxWaitMs),
-		rtkPassthroughFor: Array.isArray(r.rtkPassthroughFor)
-			? r.rtkPassthroughFor.filter((x): x is string => typeof x === "string")
-			: DEFAULTS.rtkPassthroughFor,
+		passthroughFor: Array.isArray(r.passthroughFor)
+			? r.passthroughFor.filter((x): x is string => typeof x === "string")
+			: DEFAULTS.passthroughFor,
 		shortcuts: {
 			background: typeof sc.background === "string" ? sc.background : DEFAULTS.shortcuts.background,
 			manager: typeof sc.manager === "string" ? sc.manager : DEFAULTS.shortcuts.manager,
@@ -148,9 +148,9 @@ export function pruneDefaults(raw: Record<string, unknown>): Record<string, unkn
 			if (Object.keys(sc).length > 0) out.shortcuts = sc;
 			continue;
 		}
-		if (key === "rtkPassthroughFor" && Array.isArray(value)) {
+		if (key === "passthroughFor" && Array.isArray(value)) {
 			const asSet = (a: unknown[]) => JSON.stringify([...new Set(a.map(String))].toSorted((x, y) => x.localeCompare(y)));
-			if (asSet(value) !== asSet(DEFAULTS.rtkPassthroughFor)) out[key] = value;
+			if (asSet(value) !== asSet(DEFAULTS.passthroughFor)) out[key] = value;
 			continue;
 		}
 		if (key in DEFAULTS && key !== "dir" && sameJson(value, DEFAULTS[key as keyof TasksConfig])) continue;

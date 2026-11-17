@@ -27,11 +27,11 @@ export interface TaskRecord {
 	id: string;
 	kind: TaskKind;
 	label: string;
-	/** Command as the model wrote it (before any rtk rewrite). */
+	/** Command as the model wrote it (before any hook rewrite). */
 	requested: string;
 	/** Command that actually ran. */
 	executed: string;
-	/** Whether `executed` came from an rtk rewrite. */
+	/** Whether `executed` came from a hook rewrite. */
 	rewritten: boolean;
 	cwd: string;
 	pid: number;

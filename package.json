@@ -1,7 +1,7 @@
 {
   "name": "realtasks",
   "version": "0.1.0",
-  "description": "Background tasks for pi: yield-window bash, exactly-once task notifications, stdin/PTY driving, readiness, re-adoption, monitors, rtk-compatible.",
+  "description": "Background tasks for pi: yield-window bash, exactly-once task notifications, stdin/PTY driving, readiness, re-adoption, monitors.",
   "type": "module",
   "keywords": ["pi-package", "pi-extension", "background-tasks"],
   "license": "MIT",

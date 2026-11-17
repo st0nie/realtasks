@@ -3,7 +3,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { backgroundInput, registerCommands, registerShortcuts } from "./src/commands.ts";
 import { NOTIFICATION_TYPE, type NotificationDetails } from "./src/notify.ts";
-import { stashCommand } from "./src/rtk.ts";
+import { stashCommand } from "./src/rewrite.ts";
 import { Runtime } from "./src/runtime.ts";
 import { sweepOld } from "./src/store.ts";
 import { registerBash } from "./src/tools/bash.ts";
@@ -46,7 +46,7 @@ export default function realtasks(pi: ExtensionAPI): void {
 		renderNotification(message, options, theme),
 	);
 
-	// rtk contract / recovery step 1: stash the command as this handler sees it.
+	// Rewrite recovery step 1: stash the command as this handler sees it.
 	pi.on("tool_call", (event) => {
 		if (event.toolName === "bash" && !event.parentToolCallId) {
 			stashCommand(event.toolCallId, (event.input as { command?: unknown }).command);

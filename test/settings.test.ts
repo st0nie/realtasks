@@ -79,13 +79,13 @@ describe("config file writes", () => {
 			pruneDefaults({
 				defaultTimeoutMs: 120_000,
 				maxRunning: 4,
-				rtkPassthroughFor: ["tty", "ready"],
+				passthroughFor: ["tty", "ready"],
 				shortcuts: { background: "ctrl+b", manager: "f6" },
 				dir: "/logs",
 				extra: true,
 			}),
 		).toEqual({ maxRunning: 4, shortcuts: { manager: "f6" }, dir: "/logs", extra: true });
-		expect(pruneDefaults({ rtkPassthroughFor: ["ready"], shortcuts: { background: "ctrl+b" } })).toEqual({ rtkPassthroughFor: ["ready"] });
+		expect(pruneDefaults({ passthroughFor: ["ready"], shortcuts: { background: "ctrl+b" } })).toEqual({ passthroughFor: ["ready"] });
 	});
 	test("writeConfigFile creates the directory and leaves no temp file", () => {
 		const { dir, cleanup } = tmpDir();
@@ -165,12 +165,12 @@ describe("/tasks settings panel", () => {
 		expect(p.rt.cfg.defaultNotify).toBe("wake");
 	});
 
-	test("rtk rows toggle one feature of rtkPassthroughFor", () => {
+	test("passthrough rows toggle one feature of passthroughFor", () => {
 		const p = open();
-		p.goto("rtk.tty");
+		p.goto("passthrough.tty");
 		p.press(KEY.enter);
-		expect(p.file()).toEqual({ rtkPassthroughFor: ["ready"] });
-		expect(p.rt.cfg.rtkPassthroughFor).toEqual(["ready"]);
+		expect(p.file()).toEqual({ passthroughFor: ["ready"] });
+		expect(p.rt.cfg.passthroughFor).toEqual(["ready"]);
 		p.press(KEY.enter);
 		expect(p.file()).toEqual({});
 	});

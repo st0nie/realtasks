@@ -8,7 +8,7 @@ import type { AgentToolResult, BashToolDetails } from "@earendil-works/pi-coding
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { NotifyPolicy } from "../config.ts";
 import { formatForModel, readRange } from "../output.ts";
-import { recoverCommand } from "../rtk.ts";
+import { recoverCommand } from "../rewrite.ts";
 import type { Runtime } from "../runtime.ts";
 import type { Task } from "../task.ts";
 import { cleanOutput, lastLines } from "../text.ts";
@@ -52,9 +52,9 @@ export const bashParams = Type.Object({
 		}),
 	),
 	keep_alive: Type.Optional(Type.Boolean({ description: "Keep running after Pi exits; re-adopted next session" })),
-	rtk: Type.Optional(
+	rewrite: Type.Optional(
 		Type.Union([Type.Literal("auto"), Type.Literal("off")], {
-			description: "off runs the command exactly as written, undoing an rtk rewrite",
+			description: "off runs the command verbatim as written, bypassing any command-rewriting hook",
 		}),
 	),
 });
@@ -69,7 +69,7 @@ export interface BashParams {
 	stdin?: boolean;
 	notify?: NotifyPolicy;
 	keep_alive?: boolean;
-	rtk?: "auto" | "off";
+	rewrite?: "auto" | "off";
 }
 
 /** Built-in bash details (so Pi's renderer works) plus task fields. */
@@ -153,18 +153,18 @@ export function registerBash(rt: Runtime): void {
 			const p = rawParams as BashParams;
 			rt.ctx = ctx;
 			if (!p.command?.trim()) throw new Error("Command is empty.");
-			// rtk contract 2: read the command here, after every tool_call handler ran.
+			// Hook contract 2: read the command here, after every tool_call handler ran.
 			const rec = recoverCommand(toolCallId, p.command, () => ctx.sessionManager.getBranch());
 			const wantsLive = Boolean(p.ready) || Boolean(p.tty);
 			const passthrough =
-				p.rtk === "off" ||
-				(p.ready !== undefined && rt.cfg.rtkPassthroughFor.includes("ready")) ||
-				(p.tty === true && rt.cfg.rtkPassthroughFor.includes("tty"));
+				p.rewrite === "off" ||
+				(p.ready !== undefined && rt.cfg.passthroughFor.includes("ready")) ||
+				(p.tty === true && rt.cfg.passthroughFor.includes("tty"));
 			const executed = rec.rewritten && passthrough ? rec.requested : rec.executed;
 			const rewritten = executed !== rec.requested;
 			const notes: string[] = [];
-			if (rec.rewritten && passthrough) notes.push(`(ran the original command; rtk rewrite skipped${wantsLive ? " for live output" : ""})`);
-			if (p.rtk === "off" && !rec.known) notes.push("(rtk: off requested, but the original command was not recoverable; ran as received)");
+			if (rec.rewritten && passthrough) notes.push(`(ran the original command; command rewrite skipped${wantsLive ? " for live output" : ""})`);
+			if (p.rewrite === "off" && !rec.known) notes.push("(rewrite: off requested, but the original command was not recoverable; ran as received)");
 
 			const background = Boolean(p.run_in_background) || p.ready !== undefined;
 			if (background) rt.manager.assertCapacity();

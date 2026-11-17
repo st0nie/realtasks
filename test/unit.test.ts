@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS, loadConfig, mergeConfig, resolveConfig } from "../src/config.ts";
 import { COALESCE_MS, IDLE_RUNNING_COALESCE_MS, Notifier, type NoticeItem, terminalBlock } from "../src/notify.ts";
-import { commandFromBranch, recoverCommand, stashCommand } from "../src/rtk.ts";
+import { commandFromBranch, recoverCommand, stashCommand } from "../src/rewrite.ts";
 import { findKeyConflicts } from "../src/shortcuts.ts";
 import { formatLineRange, parseLineRange } from "../src/output.ts";
 import {
@@ -142,7 +142,7 @@ describe("keybinding conflicts", () => {
 	});
 });
 
-describe("rtk recovery", () => {
+describe("rewrite recovery", () => {
 	const branch = [
 		{
 			type: "message",
@@ -153,14 +153,14 @@ describe("rtk recovery", () => {
 		expect(commandFromBranch(branch, "c1")).toBe("git status");
 		expect(commandFromBranch(branch, "zz")).toBeUndefined();
 	});
-	test("stash wins when we ran before rtk", () => {
+	test("stash wins when we ran before a rewriting hook", () => {
 		stashCommand("s1", "ls -la");
-		const r = recoverCommand("s1", "rtk ls -la", () => []);
-		expect(r).toEqual({ requested: "ls -la", executed: "rtk ls -la", rewritten: true, known: true });
+		const r = recoverCommand("s1", "tokf ls -la", () => []);
+		expect(r).toEqual({ requested: "ls -la", executed: "tokf ls -la", rewritten: true, known: true });
 	});
 	test("falls back to the branch when the stash saw the rewrite", () => {
-		stashCommand("c1", "rtk git status");
-		const r = recoverCommand("c1", "rtk git status", () => branch);
+		stashCommand("c1", "sandbox-wrap -- git status");
+		const r = recoverCommand("c1", "sandbox-wrap -- git status", () => branch);
 		expect(r.requested).toBe("git status");
 		expect(r.rewritten).toBe(true);
 	});
@@ -168,7 +168,7 @@ describe("rtk recovery", () => {
 		stashCommand("n1", "uname -a");
 		expect(recoverCommand("n1", "uname -a", () => []).rewritten).toBe(false);
 	});
-	test("unknown original runs the rewrite and says so", () => {
+	test("unknown original runs as received and marks known false", () => {
 		const r = recoverCommand("x9", "rtk cargo test", () => []);
 		expect(r).toEqual({ requested: "rtk cargo test", executed: "rtk cargo test", rewritten: false, known: false });
 	});
@@ -211,8 +211,8 @@ describe("notification format", () => {
 		expect(b).toContain("log: /tmp/x.log");
 		expect(b).toEndWith("</task-notification>");
 	});
-	test("shows the rtk rewrite", () => {
-		expect(terminalBlock(rec({ rewritten: true, executed: "rtk npm test" }), "")).toContain("npm test → rtk npm test");
+	test("shows a hook rewrite", () => {
+		expect(terminalBlock(rec({ rewritten: true, executed: "tokf npm test" }), "")).toContain("npm test → tokf npm test");
 	});
 });
 

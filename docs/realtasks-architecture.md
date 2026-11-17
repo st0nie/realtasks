@@ -4,7 +4,7 @@ Oct 28, 2026 · @ston
 
 ## Summary
 
-realtasks is one Pi extension that merges Claude Code's background model (fire, keep working, get told when it's done) with Codex's unified-exec model (yield after a window, then poll or drive the process via stdin/PTY). It overrides `bash`, adds four small task tools plus `monitor`, and stays fully compatible with rtk's Pi hooks.
+realtasks is one Pi extension that merges Claude Code's background model (fire, keep working, get told when it's done) with Codex's unified-exec model (yield after a window, then poll or drive the process via stdin/PTY). It overrides `bash`, adds four small task tools plus `monitor`, and stays compatible with command-rewriting `tool_call` hooks (such as rtk).
 
 ### Goals
 
@@ -13,7 +13,7 @@ realtasks is one Pi extension that merges Claude Code's background model (fire, 
 - Interactive processes (REPLs, `ssh`, prompts, TUIs) can be driven, not just watched.
 - Dev servers report "ready" instead of making the agent guess when to proceed.
 - Tasks survive `/reload` (opt-in survive across process restart) without losing exit codes.
-- rtk keeps compressing output for finite commands, and never breaks streaming ones.
+- Command-rewriting hooks (such as rtk) keep working for finite commands, and never break streaming or interactive ones.
 - Small: no tmux, one optional native dep (PTY), under \~3k lines.
 
 **Success criteria**: the seven acceptance flows in the Acceptance tests section pass on macOS, Linux and Windows (Git Bash) with rtk installed and not installed.
@@ -27,7 +27,7 @@ Each existing plugin nails one half: patty has Claude Code's notifications but n
 | [pi-patty-bg-tasks](https://github.com/patty-io/pi-patty-bg-tasks) | Claude Code: auto-bg at 120s, `bash_bg`, `jobs`, `monitor`, `agent_bg` | `<task-notification>` steered mid-turn, exactly-once | No | No, in-memory; shutdown kills all | Can't drive interactive processes; logs in `/tmp`; blocks `sleep` heuristically |
 | [pi-background-tasks](https://pi.dev/packages/pi-background-tasks?type=extension) (ismailsaleekh) | `bg_run` plus delegated agents, attestation, Fusion | Durable notification with follow-up wake | No | Opt-in `surviveReload` for plain shells | Very large surface; shell tasks are a small part |
 | [pi-process](https://github.com/LiboShen/pi-process) | OpenClaw/Codex-ish: auto-bg after `yieldMs` (10s), `process` tool | Polling (`process poll`) | Yes, `write` + optional node-pty | No, in-memory with TTL | No push notifications; agent burns turns polling |
-| [pi-unified-exec](https://pi.dev/packages/pi-unified-exec) | Faithful Codex port: `exec_command` + `write_stdin` | Polling with long empty-poll waits | Yes, control bytes and PTY | No | Replaces `bash` name, so rtk hooks keyed on `bash` stop firing |
+| [pi-unified-exec](https://pi.dev/packages/pi-unified-exec) | Faithful Codex port: `exec_command` + `write_stdin` | Polling with long empty-poll waits | Yes, control bytes and PTY | No | Replaces `bash` name, so command-rewriting hooks keyed on `bash` stop firing |
 
 What we take: patty's exactly-once notification latch; pi-process's stdin and PTY; Claude Code's timeout that backgrounds instead of killing; unified-exec's control-byte escapes; pi-background-tasks' durable completion. What we drop: subagents, `sleep` blocking, polling as the primary path.
 
@@ -53,7 +53,7 @@ Promotion moves nothing: the process was already detached and writing to its log
 
 ## Agent tool surface
 
-Six tools. `bash` keeps the built-in name and its `command`/`timeout` params so other extensions (rtk, permission gates) keep working; everything new is an optional param. `timeout` keeps its name and unit (seconds) but takes Claude Code's meaning (background, not kill).
+Six tools. `bash` keeps the built-in name and its `command`/`timeout` params so other extensions (command-rewriting hooks, permission gates) keep working; everything new is an optional param. `timeout` keeps its name and unit (seconds) but takes Claude Code's meaning (background, not kill).
 
 ### bash (override)
 
@@ -68,7 +68,7 @@ Six tools. `bash` keeps the built-in name and its `command`/`timeout` params so 
 | `stdin` | bool | false | Keep a stdin pipe open so `task_input` can write to it (implied by `tty`) |
 | `notify` | `wake` / `passive` / `silent` | `wake` | Completion delivery policy (see Notifications) |
 | `keep_alive` | bool | false | Survive Pi exit; re-adopted next session |
-| `rtk` | `auto` / `off` | `auto` | `off` runs the command as the model wrote it, undoing the rtk hook's rewrite (see rtk section) |
+| `rewrite` | `auto` / `off` | `auto` | `off` runs the command as the model wrote it, undoing any hook rewrite (see Command-rewriting hooks) |
 
 Result when the command finishes in the window: identical to built-in `bash` (same truncation, same `details` shape, same `structuredContent`). No task is created: its record, log and exit file are deleted, and the full output (when truncated) is copied to a temp file like the built-in. When promoted: `Still running as task b7f3k9a2 ("npm test"). Last 20 lines: … Full log: <path>. You will be notified when it ends; read more with task_output.`
 
@@ -160,7 +160,7 @@ A left click anywhere on the card, padding included, toggles just that card betw
 
 **Other one-shot signals** (each at most once per task, all `passive`):
 
-- Stall: no output for 45 s, not a PTY, not rtk-rewritten, and the last line looks like a prompt (`?`, `(y/n)`, `Password:`, `>`). Suggests `task_input` or `task_stop`.
+- Stall: no output for 45 s, not a PTY, not rewritten, and the last line looks like a prompt (`?`, `(y/n)`, `Password:`, `>`). Suggests `task_input` or `task_stop`.
 - Ready: when `ready` matches after the `bash` call already returned (only if it timed out waiting).
 - Log cap reached: output past `maxLogBytes` is dropped from the log head and the agent is told once.
 
@@ -225,52 +225,43 @@ Every task runs detached in its own process group with output going straight to 
 - **PTY**: node-pty uses ConPTY. It takes no signals, so stopping a PTY task kills its processes as above and closes the pseudo console with `pty.kill()` (no signal argument).
 - **Files**: other processes (a daemonized grandchild, a virus scanner) may hold task files open. Record writes retry the atomic rename a few times and then write in place; deleting the files of a foreground command that finished in its window ignores files that are still busy (the retention sweep removes them later).
 
-## rtk compatibility (official Pi hook)
+## Command-rewriting hooks
 
-Target: rtk's own Pi extension, [hooks/pi/rtk.ts](https://raw.githubusercontent.com/rtk-ai/rtk/develop/hooks/pi/rtk.ts), installed by `rtk init --agent pi` to `~/.pi/agent/extensions/rtk.ts` (or `.pi/extensions/rtk.ts`), shipped from [RTK 0.42](https://github.com/rtk-ai/rtk/pull/1741). realtasks ships no rtk logic of its own; it keeps the hook's contract intact and protects the cases where a rewrite would break a background task.
-
-**What the hook does** (from its source):
-
-- Listens on `tool_call`; acts only when `event.toolName === "bash"`.
-- Skips empty commands, commands that already start with the word `rtk`, and runs where `RTK_DISABLED=1` is set in Pi's own environment.
-- Runs `rtk rewrite <cmd>` via `pi.exec` with a 2 s timeout; exit 0 or 3 with stdout → replaces `event.input.command` in place; anything else passes through (fail-open).
-- Probes `rtk --version` at load; missing or older than 0.23 → disabled, status line says why.
+Extensions such as rtk ([hooks/pi/rtk.ts](https://raw.githubusercontent.com/rtk-ai/rtk/develop/hooks/pi/rtk.ts), installed by `rtk init --agent pi` from [RTK 0.42](https://github.com/rtk-ai/rtk/pull/1741)), tokf, or sandbox/wrapper hooks listen on `tool_call` for `event.toolName === "bash"` and mutate `event.input.command` in place before `execute()` runs. realtasks ships no wrapper-specific logic of its own; it keeps that hook contract intact for any command modifier and bypasses the rewrite where a wrapper would break a task.
 
 ### Contracts realtasks must keep
 
-1. The override is registered under the exact name `bash`, so the hook fires. Never rename it to `exec_command` (pi-unified-exec's choice, which silently disables rtk).
+1. The override is registered under the exact name `bash`, so `tool_call` hooks keyed on `bash` fire. Never rename it to `exec_command` (pi-unified-exec's choice, which silently disables such hooks).
 2. The command is read from `params.command` inside `execute()`, after all `tool_call` handlers ran. Never cache it from an earlier event.
-3. `command` stays a plain string param; extra params (`run_in_background`, `ready`, `tty`, …) live alongside it and are untouched by the hook.
-4. `task_output`, `task_wait`, `task_input`, `task_stop`, `task_list` and `monitor` have other tool names, so the hook never rewrites them. `monitor` is the right tool for `tail -f`-style streams for that reason.
+3. `command` stays a plain string param; extra params (`run_in_background`, `ready`, `tty`, `rewrite`, …) live alongside it and are untouched by hooks.
+4. `task_output`, `task_wait`, `task_input`, `task_stop`, `task_list` and `monitor` have other tool names, so `bash` hooks never rewrite them. `monitor` is the right tool for `tail -f`-style streams for that reason.
 5. Logs, notifications and the dock show the command that actually ran. Pi's transcript renders the original call, so the task record stores both `requested` and `executed` and the UI shows `git status → rtk git status` when they differ.
 
 ### Where a rewrite hurts, and the fix
 
-rtk filters condense output, and some only emit once the wrapped command exits. That is ideal for finite commands, but harmful when realtasks needs live bytes:
+Command wrappers and output filters often condense or buffer output until the wrapped command exits, or interpose a process between the PTY and the child. That is fine for finite commands, but harmful when realtasks needs live bytes or raw output:
 
 | Case | Problem with the rewritten command | realtasks behavior |
 | --- | --- | --- |
-| Finite foreground or `run_in_background` (tests, builds, `git log`) | None; compressed output is the point | Run as rewritten |
-| `ready` set (dev servers) | Ready pattern may never appear in live output | Run the original command |
-| `tty: true` (REPLs, prompts) | rtk sits between the PTY and the program | Run the original command |
-| Stall detector on a rewritten task | Silence is expected while rtk buffers | Detector disabled for rewritten tasks |
-| Explicit `rtk: "off"` | Model or user wants raw output | Run the original command |
+| Finite foreground or `run_in_background` (tests, builds, `git log`) | None; the wrapper's behavior is wanted | Run as rewritten |
+| `ready` set (dev servers, configurable via `passthroughFor`) | Ready pattern may never appear in live output | Run the original command |
+| `tty: true` (REPLs, prompts, configurable via `passthroughFor`) | Wrapper sits between the PTY and the program | Run the original command |
+| Stall detector on a rewritten task | Silence is expected while a wrapper buffers | Detector disabled for rewritten tasks |
+| Explicit `rewrite: "off"` | Model wants the exact command with no modifiers | Run the original command |
 
-**Recovering the original command** (the hook mutates in place, so `execute()` only sees the rewrite):
+**Recovering the original command** (hooks mutate `event.input.command` in place, so `execute()` only sees the rewrite):
 
-1. realtasks registers its own `tool_call` handler that stashes `event.input.command` by `toolCallId`. If it loads before rtk.ts, this is the original.
+1. realtasks registers its own `tool_call` handler that stashes `event.input.command` by `toolCallId`. If it loads before the rewriting hook, this is the original.
 2. Otherwise, read the original arguments of that `toolCallId` from the assistant message in `ctx.sessionManager.getBranch()`; the transcript keeps the model's unmodified call.
-3. If neither is available, run the rewritten command and say so in the result.
+3. If neither is available, run the command as received and say so in the result when `rewrite: "off"` was requested.
 
-Step 2 needs a spike to confirm the assistant message is on the branch before tools execute. If it is, step 1 becomes a fast path only.
-
-**Not in scope**: the official hook doesn't cover user `!cmd`, so neither does realtasks' `/bg <cmd>`. realtasks never sets `RTK_DISABLED` and never shells out to `rtk` itself.
+**Not in scope**: `tool_call` hooks do not cover user `!cmd`, so neither does realtasks' `/bg <cmd>`. realtasks never sets tool-specific environment variables (such as `RTK_DISABLED`) and never shells out to any modifier binary itself.
 
 ## User UX
 
 The user sees what is running at a glance and can take over any task without asking the agent.
 
-- **Foreground `bash` rendering**: live tail via `onUpdate` (last 8 lines, emitted only when output changes) and Pi's own 1 s `Elapsed` timer. After 2 s a dim hint line appears inside that `bash` row only while it is running: `ctrl+b to background · auto in 1m48s` (the countdown to the `timeout` window end, computed in `renderResult` on each 1 s redraw). The key is shown only if the background shortcut was actually registered (not `off`, no clash, TUI); otherwise the line is just `backgrounds in 1m48s`. The hint is rendered only for partial tool results, so it disappears with the final result; realtasks sets no editor widget for it. Shows `requested → executed` when the rtk hook rewrote the command.
+- **Foreground `bash` rendering**: live tail via `onUpdate` (last 8 lines, emitted only when output changes) and Pi's own 1 s `Elapsed` timer. After 2 s a dim hint line appears inside that `bash` row only while it is running: `ctrl+b to background · auto in 1m48s` (the countdown to the `timeout` window end, computed in `renderResult` on each 1 s redraw). The key is shown only if the background shortcut was actually registered (not `off`, no clash, TUI); otherwise the line is just `backgrounds in 1m48s`. The hint is rendered only for partial tool results, so it disappears with the final result; realtasks sets no editor widget for it. Shows `requested → executed` when a hook rewrote the command.
 - **Task tool rendering** (`renderCall`/`renderResult` on `task_output`, `task_wait`, `task_input`, `task_stop`, `monitor`): calls name the task by label, never by bare id, and show durations in human units, never raw milliseconds. Examples: `task_output npm test (b7f3k9a2) · peek`, `task_output npm test (b7f3k9a2) · lines 120-260 · grep /error/`, `task_wait npm test (b7f3k9a2) · up to 10m · until /ready/`, `task_input python REPL (bdw9czz1) · "print(2+2)⏎"`, `task_stop dev server (bgkrw0t2)`, `task_stop all running tasks`. A `task_wait` on several tasks names each of them, separated by commas. An unknown id falls back to the id alone. A collapsed `task_output` result is one status row (`· npm test running`); expanded, it shows the output. While `task_wait` waits, its row shows a live line (the renderer redraws it every 120 ms with its own timer, the same frame rate as the dock, and computes the elapsed time from the wait's start timestamp; output updates arrive through `onUpdate` at most once a second), `✱ waiting for npm test · 1m12s of 10m │ test 31 ok`, with the spinner, the task labels, the elapsed wait, the cap, and the latest output line of the first task still running (sent through `onUpdate`, so it is visible but costs no model tokens). When it returns, the row shows why, naming the task the wait ended on: `✓ npm test completed exit 0 · waited 1m14s`, `✓ dev server output matched · waited 3s`, `still running · waited 10m (timeout)`, or `wait cancelled · 4s`.
 - **Dock** (`ctx.ui.setWidget`, above the editor), drawn as a tree in the style of rpiv-todo and Claude Code's background tasks:
 
@@ -346,8 +337,8 @@ The user sees what is running at a glance and can take over any task without ask
 | Log size limit | `maxLogBytes` | Presets `10 MB`, `50 MB`, `100 MB`, `500 MB`, `1 GB`, or a custom size |
 | Log retention | `logRetentionDays` | Presets `keep forever`, `1 day`, `3 days`, `7 days`, `14 days`, `30 days`, or a custom number of days |
 | Print mode wait | `printModeMaxWaitMs` | Presets `no wait`, `1m`, `5m`, `10m`, `30m`, `1h`, or a custom duration |
-| Original command with `ready` | `rtkPassthroughFor` holds `ready` | Toggles `true`, `false` |
-| Original command with `tty` | `rtkPassthroughFor` holds `tty` | Toggles `true`, `false` |
+| Original command with `ready` | `passthroughFor` holds `ready` | Toggles `true`, `false` |
+| Original command with `tty` | `passthroughFor` holds `tty` | Toggles `true`, `false` |
 | Background shortcut | `shortcuts.background` | Presets `ctrl+b`, `ctrl+shift+b`, `off`, or a custom key |
 | Manager shortcut | `shortcuts.manager` | Presets `shift+down`, `off`, or a custom key |
 
@@ -375,7 +366,7 @@ All keys live in `<agentDir>/realtasks/config.json` (default `~/.pi/agent/realta
 | `stallSeconds` | 45 | Silence before the prompt-looking stall check |
 | `defaultNotify` | `wake` | Policy when `bash` omits `notify` |
 | `printModeMaxWaitMs` | 600000 | How long print/JSON mode waits for `wake` tasks |
-| `rtkPassthroughFor` | `["ready", "tty"]` | Task features that run the original command instead of the rtk rewrite |
+| `passthroughFor` | `["ready", "tty"]` | Task features that run the original command instead of a hook's rewrite |
 | `shortcuts.background` | `ctrl+b` | Promote shortcut; an editor key such as the default acts only on an empty input; `off` disables |
 | `shortcuts.manager` | `shift+down` | Manager shortcut; `off` disables |
 | `dir` | `<agentDir>/tasks` | Log and record root |
@@ -384,12 +375,12 @@ All keys live in `<agentDir>/realtasks/config.json` (default `~/.pi/agent/realta
 
 Ship the Claude Code core first; Codex-style interaction and durability follow once the core is stable.
 
-1. **v0.1 Core**: `bash` override with timeout promotion and `run_in_background`, `task_output`, `task_wait`, `task_stop`, `task_list`, exactly-once notifications, disk logs, dock, `ctrl+b`, rtk contracts 1–5 with original-command recovery.
+1. **v0.1 Core**: `bash` override with timeout promotion and `run_in_background`, `task_output`, `task_wait`, `task_stop`, `task_list`, exactly-once notifications, disk logs, dock, `ctrl+b`, hook contracts 1–5 with original-command recovery.
 2. **v0.2 Interaction**: `task_input`, `tty` via optional `@lydell/node-pty`, `ready`, stall detection, `/tasks` overlay.
 3. **v0.3 Durability**: re-adoption across `/reload`, `keep_alive`, print-mode settle handling, log retention.
 4. **v0.4 Streams**: `monitor` (command and file sources), event batching and flood stop.
 
-**Non-goals**: background subagents (`agent_bg`), WebSocket monitors, tmux or any external process manager, blocking `sleep` commands, shipping rtk rewrite logic, PowerShell or `cmd.exe` as the task shell on Windows.
+**Non-goals**: background subagents (`agent_bg`), WebSocket monitors, tmux or any external process manager, blocking `sleep` commands, shipping command-rewrite logic, PowerShell or `cmd.exe` as the task shell on Windows.
 
 ## Acceptance tests
 
@@ -416,7 +407,7 @@ Resolved from the original open questions:
 - Session switch stops pipe-mode tasks (TUI asks first); `keep_alive` tasks keep running.
 - `monitor` ships (v0.4 scope is in).
 - Linux, macOS and Windows. On Windows tasks run in the same bash Pi's built-in `bash` tool uses (Git for Windows, MSYS2 or Cygwin); the WSL launcher is not supported.
-- rtk original-command recovery uses both step 1 (own `tool_call` stash) and step 2 (assistant message on the branch); Pi persists the assistant message at `message_end`, before tool execution starts.
+- Original-command recovery uses both step 1 (own `tool_call` stash) and step 2 (assistant message on the branch); Pi persists the assistant message at `message_end`, before tool execution starts.
 
 ## Development
 

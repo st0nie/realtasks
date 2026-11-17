@@ -194,19 +194,19 @@ function numberRow(o: {
 	};
 }
 
-function rtkRow(feature: "ready" | "tty", description: string): Row {
+function passthroughRow(feature: "ready" | "tty", description: string): Row {
 	return {
-		id: `rtk.${feature}`,
+		id: `passthrough.${feature}`,
 		label: `Original command with ${feature}`,
 		description,
-		show: (c) => String(c.rtkPassthroughFor.includes(feature)),
+		show: (c) => String(c.passthroughFor.includes(feature)),
 		cycle: ["true", "false"],
 		write: (raw, value, user) => {
-			const list = user.rtkPassthroughFor.filter((f) => f !== feature);
+			const list = user.passthroughFor.filter((f) => f !== feature);
 			if (value === "true") list.push(feature);
-			raw.rtkPassthroughFor = list;
+			raw.passthroughFor = list;
 		},
-		inProject: (p) => "rtkPassthroughFor" in p,
+		inProject: (p) => "passthroughFor" in p,
 	};
 }
 
@@ -301,8 +301,8 @@ export const ROWS: Row[] = [
 		presets: [0, 60_000, 300_000, 600_000, 1_800_000, 3_600_000],
 		min: MINIMUMS.printModeMaxWaitMs,
 	}),
-	rtkRow("ready", "Run the original command instead of the rtk rewrite when bash waits for a ready pattern"),
-	rtkRow("tty", "Run the original command instead of the rtk rewrite when bash runs in a terminal (tty)"),
+	passthroughRow("ready", "Run the original command instead of a rewritten one when bash waits for a ready condition"),
+	passthroughRow("tty", "Run the original command instead of a rewritten one when bash runs in a terminal (tty)"),
 	shortcutRow("background", "Background shortcut", "Sends running foreground commands to the background; an editor key such as ctrl+b acts only on an empty input", [
 		"ctrl+b",
 		"ctrl+shift+b",

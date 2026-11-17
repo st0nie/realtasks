@@ -2,7 +2,7 @@
 
 Background tasks for [Pi](https://pi.dev). You start a command, keep working, and get told once when it ends. It also drives interactive programs through stdin or a PTY.
 
-realtasks overrides `bash` and adds `task_output`, `task_wait`, `task_input`, `task_stop`, `task_list` and `monitor`. It works with rtk's Pi hook and with goal plugins such as pi-codex-goal.
+realtasks overrides `bash` and adds `task_output`, `task_wait`, `task_input`, `task_stop`, `task_list` and `monitor`. It works with command-rewriting hooks (such as rtk) and with goal plugins such as pi-codex-goal.
 
 The full design is in [docs/realtasks-architecture.md](docs/realtasks-architecture.md).
 
@@ -37,6 +37,7 @@ realtasks runs on Linux, macOS and Windows. On Windows, tasks run in the same ba
 - `tty: true` or `stdin: true` lets `task_input` write to the process.
 - `notify` sets the delivery policy. `wake` (the default) starts a turn, `passive` waits for the next turn, `silent` only shows a toast.
 - `keep_alive: true` keeps the task running after Pi exits. It is re-adopted when the session resumes.
+- `rewrite: "off"` runs the command verbatim as written, bypassing command-rewriting hooks (`ready` and `tty` bypass them by default).
 
 Output goes to `~/.pi/agent/tasks/<session>/<id>.log`. Logs rotate at 50 MB and are deleted after 7 days.
 
@@ -101,7 +102,7 @@ The easiest way to change it is `/tasks settings`. Pick a row and press `enter`:
   "stallSeconds": 45,
   "defaultNotify": "wake",
   "printModeMaxWaitMs": 600000,
-  "rtkPassthroughFor": ["ready", "tty"],
+  "passthroughFor": ["ready", "tty"],
   "shortcuts": { "background": "ctrl+b", "manager": "shift+down" }
 }
 ```
